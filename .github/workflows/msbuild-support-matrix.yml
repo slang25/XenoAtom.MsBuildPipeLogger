@@ -78,3 +78,21 @@ jobs:
           -LoggerDll "$env:LOGGER_DLL"
           -ConsumerExe "eng/orig-floor/OrigConsumer/bin/Release/net472/OrigConsumer.exe"
           -CurrentMsBuild "${{ steps.msbuild.outputs.msbuildPath }}"
+
+  # Demonstrates the fork's binlog format-version coupling: the logger writes in the HOST MSBuild's
+  # format, but the server reads with the CONSUMER's Microsoft.Build FileFormatVersion. Running the
+  # fork against a host whose format differs from the consumer's (16.11 v13 vs 18.4 v25) drops events.
+  handshake-repro:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build fork consumer (fork logger + server, Microsoft.Build 18.4 = reader v25)
+        run: dotnet build eng/handshake-repro/ForkConsumer/ForkConsumer.csproj -c Release --nologo
+      - name: Run the fork against mismatched- and matched-format hosts
+        shell: pwsh
+        run: >-
+          eng/handshake-repro/run.ps1
+          -ConsumerExe "eng/handshake-repro/ForkConsumer/bin/Release/net10.0/ForkConsumer.exe"
