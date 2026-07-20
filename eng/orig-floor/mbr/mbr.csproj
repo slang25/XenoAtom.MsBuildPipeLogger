@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <OutputType>Library</OutputType>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <IsPackable>false</IsPackable>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <MbrVersion Condition="'$(MbrVersion)' == ''">15.3.409</MbrVersion>
+    <NoWarn>$(NoWarn);NU1701;NU1603;MSB3277</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Restores a complete, runnable full-framework MSBuild.exe toolset of the requested
+         version into the build output directory (MSBuild.exe from contentFiles + engine/task
+         DLLs + targets from the dependency packages). One version per build via -p:MbrVersion. -->
+    <PackageReference Include="Microsoft.Build.Runtime" Version="$(MbrVersion)" />
+  </ItemGroup>
+</Project>

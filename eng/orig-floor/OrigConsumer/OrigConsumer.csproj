@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>OrigConsumer</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <!-- Standalone investigation harness; outside src/ so it stays out of CPM and the pack. -->
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <!-- The original library targets the net46-era MSBuild packages. -->
+    <NoWarn>$(NoWarn);NU1701;NU1603</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- The authentic 1.1.6 consumer stack: the original Server reads with Microsoft.Build 15.3.409. -->
+    <PackageReference Include="MsBuildPipeLogger.Server" Version="1.1.6" />
+    <PackageReference Include="Microsoft.Build" Version="15.3.409" />
+    <PackageReference Include="Microsoft.Build.Framework" Version="15.3.409" />
+  </ItemGroup>
+</Project>

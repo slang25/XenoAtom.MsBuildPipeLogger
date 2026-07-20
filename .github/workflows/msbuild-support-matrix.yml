@@ -46,3 +46,35 @@ jobs:
           -c Release
           --filter "FullyQualifiedName~FullFrameworkMsBuildEndToEndTests"
           --logger "console;verbosity=detailed"
+
+  # Finds the support floor of the ORIGINAL (Dave Glick) MsBuildPipeLogger.Logger 1.1.6, which
+  # bundles its own serializer, by running it inside a matrix of real old MSBuild.exe versions
+  # (materialized from Microsoft.Build.Runtime) down to 15.1 - below the fork's 15.3 floor.
+  original-logger-floor:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Add current full-framework MSBuild to PATH
+        id: msbuild
+        uses: microsoft/setup-msbuild@v2
+      - name: Download original MsBuildPipeLogger.Logger 1.1.6
+        shell: pwsh
+        run: |
+          $url = 'https://api.nuget.org/v3-flatcontainer/msbuildpipelogger.logger/1.1.6/msbuildpipelogger.logger.1.1.6.nupkg'
+          Invoke-WebRequest $url -OutFile logger.zip
+          Expand-Archive logger.zip -DestinationPath loggerpkg -Force
+          New-Item -ItemType Directory -Force logger | Out-Null
+          Copy-Item loggerpkg/lib/netstandard2.0/MsBuildPipeLogger.Logger.dll logger/ -Force
+          "LOGGER_DLL=$((Resolve-Path logger/MsBuildPipeLogger.Logger.dll).Path)" >> $env:GITHUB_ENV
+      - name: Build the original 1.1.6 consumer (net472)
+        run: dotnet build eng/orig-floor/OrigConsumer/OrigConsumer.csproj -c Release --nologo
+      - name: Probe the original logger across MSBuild versions
+        shell: pwsh
+        run: >-
+          eng/orig-floor/run.ps1
+          -LoggerDll "$env:LOGGER_DLL"
+          -ConsumerExe "eng/orig-floor/OrigConsumer/bin/Release/net472/OrigConsumer.exe"
+          -CurrentMsBuild "${{ steps.msbuild.outputs.msbuildPath }}"
