@@ -1,0 +1,48 @@
+name: msbuild-support-matrix
+
+# Validates the minimum supported MSBuild version after the 1.1.0 rearchitecture.
+#
+#  * floor-probe: inspects the metadata of a matrix of real Microsoft.Build packages and
+#    proves the support floor is MSBuild 15.3 (fails if it ever regresses).
+#  * fullframework-e2e: builds a legacy, non-SDK .NET Framework project with the runner's real
+#    full-framework MSBuild.exe (VS 2022) through the pipe logger and asserts events stream.
+#
+# Manually runnable, and runs on push to its own branch.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'slang25/ci-msbuild-support-matrix'
+
+jobs:
+  floor-probe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Reflection floor probe (Microsoft.Build metadata matrix)
+        run: dotnet run --project eng/floor-probe/FloorProbe.csproj -c Release
+
+  fullframework-e2e:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Add full-framework MSBuild to PATH
+        id: msbuild
+        uses: microsoft/setup-msbuild@v2
+      - name: Show MSBuild version
+        run: msbuild -version -nologo
+      - name: Full-framework legacy .NET project end-to-end
+        working-directory: src
+        env:
+          FULLFRAMEWORK_MSBUILD: ${{ steps.msbuild.outputs.msbuildPath }}
+        run: >-
+          dotnet test XenoAtom.MsBuildPipeLogger.Tests/XenoAtom.MsBuildPipeLogger.Tests.csproj
+          -c Release
+          --filter "FullyQualifiedName~FullFrameworkMsBuildEndToEndTests"
+          --logger "console;verbosity=detailed"
