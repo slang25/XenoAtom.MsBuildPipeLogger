@@ -3,6 +3,10 @@
     <TargetFramework>net472</TargetFramework>
     <OutputType>Library</OutputType>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- This project carries no code; it only pulls in the MSBuild toolset. Disable generated
+         AssemblyInfo so the compile has zero inputs and can't fail on some versions' package
+         content interfering with the generated AssemblyInfo.cs. -->
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <IsPackable>false</IsPackable>
     <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
     <MbrVersion Condition="'$(MbrVersion)' == ''">15.3.409</MbrVersion>
