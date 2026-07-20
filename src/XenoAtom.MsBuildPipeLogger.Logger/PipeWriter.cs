@@ -3,6 +3,7 @@
 // See license.txt file in the project root for full license information.
 
 using System.Collections.Concurrent;
+using System.Text;
 using Microsoft.Build.Framework;
 
 namespace XenoAtom.MsBuildPipeLogger;
@@ -37,6 +38,16 @@ public abstract class PipeWriter : IPipeWriter
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
         _binaryWriter = new BinaryWriter(_memoryStream);
         _argsWriter = new BuildEventArgsWriterProxy(_binaryWriter);
+
+        // Prefix the stream with the host MSBuild's binary-log format version. The event bytes that
+        // follow are in that version's format, so the server must deserialize with it rather than
+        // guessing the consumer's version (which desyncs when host and consumer MSBuild differ).
+        using (var headerWriter = new BinaryWriter(_stream, Encoding.UTF8, leaveOpen: true))
+        {
+            headerWriter.Write(BuildEventArgsWriterProxy.GetFileFormatVersion());
+            headerWriter.Flush();
+        }
+
         var writerThread = new Thread(ProcessQueue)
         {
             IsBackground = true,

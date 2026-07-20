@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <OutputType>Library</OutputType>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- This project carries no code; it only pulls in the MSBuild toolset. Disable generated
+         AssemblyInfo so the compile has zero inputs and can't fail on some versions' package
+         content interfering with the generated AssemblyInfo.cs. -->
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <IsPackable>false</IsPackable>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <MbrVersion Condition="'$(MbrVersion)' == ''">15.3.409</MbrVersion>
+    <NoWarn>$(NoWarn);NU1701;NU1603;MSB3277</NoWarn>
+    <!-- Ensure the full transitive runtime closure (e.g. System.Threading.Tasks.Dataflow, which
+         the original logger's PipeBuffer needs) lands next to MSBuild.exe. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Restores a complete, runnable full-framework MSBuild.exe toolset of the requested
+         version. Materialize it with `dotnet publish` so the whole dependency closure copies. -->
+    <PackageReference Include="Microsoft.Build.Runtime" Version="$(MbrVersion)" />
+    <!-- Real VS MSBuild ships these in its Bin, but Microsoft.Build.Runtime does not; MSBuild and
+         the original logger's PipeBuffer need them. Supply them explicitly and high enough not to
+         downgrade newer graphs (NU1605); binding redirects are injected post-publish by run.ps1 so
+         older MSBuild that asks for older assembly versions still binds. -->
+    <PackageReference Include="System.Threading.Tasks.Dataflow" Version="9.0.0" />
+    <PackageReference Include="System.Runtime.InteropServices.RuntimeInformation" Version="4.3.0" />
+  </ItemGroup>
+  <!-- Some Microsoft.Build.Runtime versions add the bundled MSBuild.exe as a Compile item, which
+       breaks CSC (CS2015: binary file). Drop any non-source Compile inputs before compiling. -->
+  <Target Name="StripBinaryCompile" BeforeTargets="CoreCompile">
+    <ItemGroup>
+      <Compile Remove="@(Compile)" Condition="'%(Extension)' != '.cs'" />
+    </ItemGroup>
+  </Target>
+</Project>

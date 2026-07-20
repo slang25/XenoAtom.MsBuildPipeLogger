@@ -54,6 +54,27 @@ internal class BuildEventArgsWriterProxy
 
     public void Write(BuildEventArgs e) => _write(e);
 
+    /// <summary>
+    /// Gets the binary-log format version of the host MSBuild whose <see cref="BuildEventArgsWriter"/>
+    /// is used to serialize events. The server needs this to deserialize with the matching version.
+    /// </summary>
+    public static int GetFileFormatVersion()
+    {
+        var field = typeof(BinaryLogger).GetField(
+                        "FileFormatVersion",
+                        BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+                    ?? throw new MissingFieldException(
+                        typeof(BinaryLogger).FullName ?? nameof(BinaryLogger), "FileFormatVersion");
+
+        if (field.GetValue(null) is not int version)
+        {
+            throw new InvalidOperationException(
+                $"Field '{typeof(BinaryLogger).FullName}.FileFormatVersion' must be an integer.");
+        }
+
+        return version;
+    }
+
     private static Type GetBuildEventArgsWriterType()
     {
         var msBuildAssembly = typeof(BinaryLogger).GetTypeInfo().Assembly;

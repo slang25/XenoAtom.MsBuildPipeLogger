@@ -1,0 +1,98 @@
+name: msbuild-support-matrix
+
+# Validates the minimum supported MSBuild version after the 1.1.0 rearchitecture.
+#
+#  * floor-probe: inspects the metadata of a matrix of real Microsoft.Build packages and
+#    proves the support floor is MSBuild 15.3 (fails if it ever regresses).
+#  * fullframework-e2e: builds a legacy, non-SDK .NET Framework project with the runner's real
+#    full-framework MSBuild.exe (VS 2022) through the pipe logger and asserts events stream.
+#
+# Manually runnable, and runs on push to its own branch.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'slang25/ci-msbuild-support-matrix'
+
+jobs:
+  floor-probe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Reflection floor probe (Microsoft.Build metadata matrix)
+        run: dotnet run --project eng/floor-probe/FloorProbe.csproj -c Release
+
+  fullframework-e2e:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Add full-framework MSBuild to PATH
+        id: msbuild
+        uses: microsoft/setup-msbuild@v2
+      - name: Show MSBuild version
+        run: msbuild -version -nologo
+      - name: Full-framework legacy .NET project end-to-end
+        working-directory: src
+        env:
+          FULLFRAMEWORK_MSBUILD: ${{ steps.msbuild.outputs.msbuildPath }}
+        run: >-
+          dotnet test XenoAtom.MsBuildPipeLogger.Tests/XenoAtom.MsBuildPipeLogger.Tests.csproj
+          -c Release
+          --filter "FullyQualifiedName~FullFrameworkMsBuildEndToEndTests"
+          --logger "console;verbosity=detailed"
+
+  # Finds the support floor of the ORIGINAL (Dave Glick) MsBuildPipeLogger.Logger 1.1.6, which
+  # bundles its own serializer, by running it inside a matrix of real old MSBuild.exe versions
+  # (materialized from Microsoft.Build.Runtime) down to 15.1 - below the fork's 15.3 floor.
+  original-logger-floor:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Add current full-framework MSBuild to PATH
+        id: msbuild
+        uses: microsoft/setup-msbuild@v2
+      - name: Download original MsBuildPipeLogger.Logger 1.1.6
+        shell: pwsh
+        run: |
+          $url = 'https://api.nuget.org/v3-flatcontainer/msbuildpipelogger.logger/1.1.6/msbuildpipelogger.logger.1.1.6.nupkg'
+          Invoke-WebRequest $url -OutFile logger.zip
+          Expand-Archive logger.zip -DestinationPath loggerpkg -Force
+          New-Item -ItemType Directory -Force logger | Out-Null
+          Copy-Item loggerpkg/lib/netstandard2.0/MsBuildPipeLogger.Logger.dll logger/ -Force
+          "LOGGER_DLL=$((Resolve-Path logger/MsBuildPipeLogger.Logger.dll).Path)" >> $env:GITHUB_ENV
+      - name: Build the original 1.1.6 consumer (net472)
+        run: dotnet build eng/orig-floor/OrigConsumer/OrigConsumer.csproj -c Release --nologo
+      - name: Probe the original logger across MSBuild versions
+        shell: pwsh
+        run: >-
+          eng/orig-floor/run.ps1
+          -LoggerDll "$env:LOGGER_DLL"
+          -ConsumerExe "eng/orig-floor/OrigConsumer/bin/Release/net472/OrigConsumer.exe"
+          -CurrentMsBuild "${{ steps.msbuild.outputs.msbuildPath }}"
+
+  # Demonstrates the fork's binlog format-version coupling: the logger writes in the HOST MSBuild's
+  # format, but the server reads with the CONSUMER's Microsoft.Build FileFormatVersion. Running the
+  # fork against a host whose format differs from the consumer's (16.11 v13 vs 18.4 v25) drops events.
+  handshake-repro:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build fork consumer (fork logger + server, Microsoft.Build 18.4 = reader v25)
+        run: dotnet build eng/handshake-repro/ForkConsumer/ForkConsumer.csproj -c Release --nologo
+      - name: Run the fork against mismatched- and matched-format hosts
+        shell: pwsh
+        run: >-
+          eng/handshake-repro/run.ps1
+          -ConsumerExe "eng/handshake-repro/ForkConsumer/bin/Release/net10.0/ForkConsumer.exe"

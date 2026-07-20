@@ -21,7 +21,7 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
     private static readonly TimeSpan ReaderShutdownTimeout = TimeSpan.FromSeconds(5);
 
     private readonly BinaryReader _binaryReader;
-    private readonly BuildEventArgsReader _buildEventArgsReader;
+    private BuildEventArgsReader? _buildEventArgsReader;
     private readonly CancellationTokenRegistration _cancellationRegistration;
     private readonly object _readLock = new();
     private readonly Thread _readerThread;
@@ -73,7 +73,8 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
     {
         PipeStream = pipeStream ?? throw new ArgumentNullException(nameof(pipeStream));
         _binaryReader = new BinaryReader(Buffer);
-        _buildEventArgsReader = new BuildEventArgsReader(_binaryReader, GetBinaryLoggerFileFormatVersion());
+        // The BuildEventArgsReader is created lazily on the first read, once the logger's
+        // format-version header has been received (see EnsureReaderInitialized).
         CancellationToken = cancellationToken;
         if (cancellationToken.CanBeCanceled)
         {
@@ -178,7 +179,13 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
         {
             lock (_readLock)
             {
-                var args = _buildEventArgsReader.Read();
+                var reader = EnsureReaderInitialized();
+                if (reader is null)
+                {
+                    return null;
+                }
+
+                var args = reader.Read();
                 if (args is not null)
                 {
                     Dispatch(args);
@@ -196,6 +203,37 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Creates the <see cref="BuildEventArgsReader"/> on first use, reading the binary-log format
+    /// version the logger wrote as a header so events are deserialized with the version they were
+    /// written in rather than this process's MSBuild version.
+    /// </summary>
+    /// <exception cref="NotSupportedException">
+    /// The observed build used a newer binary-log format than the MSBuild loaded in this process can read.
+    /// </exception>
+    private BuildEventArgsReader? EnsureReaderInitialized()
+    {
+        if (_buildEventArgsReader is not null)
+        {
+            return _buildEventArgsReader;
+        }
+
+        // Blocks until the 4-byte header arrives; throws EndOfStreamException if the stream ends
+        // first (e.g. a build that produced no events), which the caller treats as end-of-stream.
+        var hostFormatVersion = _binaryReader.ReadInt32();
+        var consumerFormatVersion = GetBinaryLoggerFileFormatVersion();
+        if (hostFormatVersion > consumerFormatVersion)
+        {
+            throw new NotSupportedException(
+                $"The observed build was produced with MSBuild binary log format version {hostFormatVersion}, " +
+                $"but the MSBuild loaded in this process only reads up to version {consumerFormatVersion}. " +
+                "Load a newer Microsoft.Build in the consuming process (for example via Microsoft.Build.Locator).");
+        }
+
+        _buildEventArgsReader = new BuildEventArgsReader(_binaryReader, hostFormatVersion);
+        return _buildEventArgsReader;
     }
 
     /// <inheritdoc/>
@@ -231,7 +269,7 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
 
         lock (_readLock)
         {
-            _buildEventArgsReader.Dispose();
+            _buildEventArgsReader?.Dispose();
             _binaryReader.Dispose();
             Buffer.Dispose();
         }

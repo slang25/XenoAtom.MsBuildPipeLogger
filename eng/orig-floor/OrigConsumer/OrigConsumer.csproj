@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>OrigConsumer</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <!-- Standalone investigation harness; outside src/ so it stays out of CPM and the pack. -->
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <!-- The original library targets the net46-era MSBuild packages. -->
+    <NoWarn>$(NoWarn);NU1701;NU1603</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- The original library hardcodes binlog format version 7: its Server's reader proxy uses the
+         single-arg BuildEventArgsReader(BinaryReader) ctor when present, else falls back to
+         (BinaryReader, int) with version 7. Microsoft.Build 15.3.409 still has the single-arg ctor,
+         so the proxy skips the v7 path and desyncs. 15.9.20 dropped it -> forces the version-7 path
+         that matches the vendored writer, and still reads format v7 for back-compat. -->
+    <PackageReference Include="MsBuildPipeLogger.Server" Version="1.1.6" />
+    <PackageReference Include="Microsoft.Build" Version="15.9.20" />
+    <PackageReference Include="Microsoft.Build.Framework" Version="15.9.20" />
+  </ItemGroup>
+</Project>
