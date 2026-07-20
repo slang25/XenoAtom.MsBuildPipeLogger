@@ -39,7 +39,8 @@ function Add-BindingRedirects([string]$configPath, [string]$binDir) {
     if (-not $binding) { $binding = $cfg.CreateElement('assemblyBinding', $ns); [void]$runtime.AppendChild($binding) }
     $names = @(
         'System.Threading.Tasks.Dataflow', 'System.Collections.Immutable', 'System.Reflection.Metadata',
-        'System.Runtime.CompilerServices.Unsafe', 'System.Memory', 'System.Numerics.Vectors', 'System.Buffers'
+        'System.Runtime.CompilerServices.Unsafe', 'System.Memory', 'System.Numerics.Vectors', 'System.Buffers',
+        'System.Runtime.InteropServices.RuntimeInformation'
     )
     foreach ($name in $names) {
         $dll = Get-ChildItem $binDir -Filter "$name.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1

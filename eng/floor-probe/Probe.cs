@@ -80,10 +80,22 @@ static async Task<string> DownloadBuildAssemblyAsync(HttpClient http, string ver
 {
     var nupkg = Path.Combine(workDir, $"microsoft.build.{version}.nupkg");
     var url = $"https://api.nuget.org/v3-flatcontainer/microsoft.build/{version}/microsoft.build.{version}.nupkg";
-    await using (var src = await http.GetStreamAsync(url))
-    await using (var dst = File.Create(nupkg))
+
+    // nuget.org occasionally drops a connection mid-stream; retry so the guard isn't flaky.
+    const int attempts = 4;
+    for (int attempt = 1; ; attempt++)
     {
-        await src.CopyToAsync(dst);
+        try
+        {
+            var bytes = await http.GetByteArrayAsync(url);
+            await File.WriteAllBytesAsync(nupkg, bytes);
+            break;
+        }
+        catch (Exception ex) when (attempt < attempts)
+        {
+            Console.Error.WriteLine($"  download {version} attempt {attempt} failed ({ex.GetType().Name}); retrying...");
+            await Task.Delay(2000 * attempt);
+        }
     }
 
     using var archive = ZipFile.OpenRead(nupkg);

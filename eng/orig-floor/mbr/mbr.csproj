@@ -19,10 +19,12 @@
     <!-- Restores a complete, runnable full-framework MSBuild.exe toolset of the requested
          version. Materialize it with `dotnet publish` so the whole dependency closure copies. -->
     <PackageReference Include="Microsoft.Build.Runtime" Version="$(MbrVersion)" />
-    <!-- Real VS MSBuild ships System.Threading.Tasks.Dataflow in its Bin, but the Runtime package
-         does not; both MSBuild and the original logger's PipeBuffer need it. Supply it explicitly
-         (binding redirects are injected into MSBuild.exe.config post-publish by run.ps1). -->
-    <PackageReference Include="System.Threading.Tasks.Dataflow" Version="4.9.0" />
+    <!-- Real VS MSBuild ships these in its Bin, but Microsoft.Build.Runtime does not; MSBuild and
+         the original logger's PipeBuffer need them. Supply them explicitly and high enough not to
+         downgrade newer graphs (NU1605); binding redirects are injected post-publish by run.ps1 so
+         older MSBuild that asks for older assembly versions still binds. -->
+    <PackageReference Include="System.Threading.Tasks.Dataflow" Version="9.0.0" />
+    <PackageReference Include="System.Runtime.InteropServices.RuntimeInformation" Version="4.3.0" />
   </ItemGroup>
   <!-- Some Microsoft.Build.Runtime versions add the bundled MSBuild.exe as a Compile item, which
        breaks CSC (CS2015: binary file). Drop any non-source Compile inputs before compiling. -->
