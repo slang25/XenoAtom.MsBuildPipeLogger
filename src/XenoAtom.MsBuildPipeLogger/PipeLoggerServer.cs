@@ -94,6 +94,22 @@ public abstract class PipeLoggerServer<TPipeStream> : PipeEventDispatcher, IPipe
     protected abstract void Connect();
 
     /// <summary>
+    /// Accepts the next client once the current one has disconnected, for transports that serve more than
+    /// one connection. The base implementation serves a single connection and always returns
+    /// <see langword="false"/>.
+    /// </summary>
+    /// <returns><see langword="true"/> if another client was accepted and should be read;
+    /// <see langword="false"/> to finish reading.</returns>
+    protected virtual bool TryAcceptNextConnection() => false;
+
+    /// <inheritdoc/>
+    public virtual void StopListening()
+    {
+        // A transport that serves a single connection has nothing to stop accepting: it finishes when
+        // the client disconnects.
+    }
+
+    /// <summary>
     /// Starts the background reader thread.
     /// </summary>
     /// <exception cref="InvalidOperationException">The reader thread was already started.</exception>
@@ -112,9 +128,13 @@ public abstract class PipeLoggerServer<TPipeStream> : PipeEventDispatcher, IPipe
         try
         {
             Connect();
-            while (Buffer.FillFromStream(PipeStream, CancellationToken))
+            do
             {
+                while (Buffer.FillFromStream(PipeStream, CancellationToken))
+                {
+                }
             }
+            while (TryAcceptNextConnection());
         }
         catch (IOException)
         {
@@ -179,15 +199,10 @@ public abstract class PipeLoggerServer<TPipeStream> : PipeEventDispatcher, IPipe
     /// <inheritdoc/>
     public void ReadAll()
     {
-        var args = Read();
-        while (args is not null)
+        // Deliberately not stopping at PipeBuildFinishedEventArgs: that marks the end of one MSBuild
+        // submission, not the end of the transport, and a build can run several submissions.
+        while (Read() is not null)
         {
-            if (args is PipeBuildFinishedEventArgs)
-            {
-                return;
-            }
-
-            args = Read();
         }
     }
 

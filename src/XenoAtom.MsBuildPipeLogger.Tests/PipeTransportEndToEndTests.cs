@@ -36,22 +36,8 @@ public class PipeTransportEndToEndTests
         BuildEventAssertions.AssertEvents(events, messageCount);
     }
 
-    [TestMethod]
-    public async Task ReadAll_StopsAfterBuildFinishedEvent()
-    {
-        var pipeName = CreatePipeName();
-        using var server = new NamedPipeLoggerServer(pipeName);
-        var events = SubscribeAnyEvents(server);
-        var readTask = Task.Run(server.ReadAll);
-
-        using (var writer = ParameterParser.GetPipeFromParameters($"name={pipeName}"))
-        {
-            BuildEventAssertions.WriteEvents(writer, messageCount: 1, includeBuildFinished: true, includeMessageAfterBuildFinished: true);
-        }
-
-        await WaitForReadAllAsync(readTask, server).ConfigureAwait(false);
-        BuildEventAssertions.AssertEvents(events, messageCount: 1, includeBuildFinished: true);
-    }
+    // ReadAll no longer stops at the first BuildFinished, because that marks the end of a submission
+    // rather than the end of the transport. See NamedPipeMultipleSubmissionTests for the current contract.
 
     [TestMethod]
     public async Task Server_DispatchesTypedEvents()
@@ -161,6 +147,10 @@ public class PipeTransportEndToEndTests
 
     private static async Task WaitForReadAllAsync(Task readTask, IPipeLoggerServer server)
     {
+        // Every caller has finished writing by this point. A server that accepts multiple connections
+        // would otherwise keep waiting for the next submission.
+        server.StopListening();
+
         try
         {
             await readTask.WaitAsync(TestTimeout).ConfigureAwait(false);
@@ -188,8 +178,12 @@ public class PipeTransportEndToEndTests
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
-            await Task.WhenAll(readTask, process.WaitForExitAsync()).WaitAsync(TestTimeout).ConfigureAwait(false);
+            await process.WaitForExitAsync().WaitAsync(TestTimeout).ConfigureAwait(false);
             WriteLine($"Exited process {process.Id} with code {process.ExitCode}");
+
+            // The observed process has exited, so no further submission can connect.
+            server.StopListening();
+            await readTask.WaitAsync(TestTimeout).ConfigureAwait(false);
             return process.ExitCode;
         }
         catch (TimeoutException)

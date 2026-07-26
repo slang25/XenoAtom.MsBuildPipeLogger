@@ -28,9 +28,9 @@ Because the wire format is XenoAtom's own — not the MSBuild binary-log format 
 ```
 
 ```csharp
-using var server = new NamedPipeLoggerServer("my-pipe");
+using var server = new NamedPipeLoggerServer(PipeLoggerServer.CreateUniquePipeName());
 server.MessageRaised += m => Console.WriteLine(m.Message);
-server.ReadAll();
+server.ReadAll();   // call server.StopListening() from another thread once the build process exits
 ```
 
 The bundled logger assembly is loaded by MSBuild itself (in the process running the build) from the isolated `XenoAtom.MsBuildPipeLogger/` subfolder, where it reads MSBuild's real `BuildEventArgs` through the public API and serializes them into the wire format. Only the logger side touches `Microsoft.Build`, and it uses whatever MSBuild is already loaded in the build process.
@@ -67,7 +67,7 @@ Use `PipeLoggerServer.GetLoggerSpecification(...)` to build the `type,assembly;p
 using System.Diagnostics;
 using XenoAtom.MsBuildPipeLogger;
 
-var pipeName = $"build-events-{Guid.NewGuid():N}";
+var pipeName = PipeLoggerServer.CreateUniquePipeName("build-events");
 using var server = new NamedPipeLoggerServer(pipeName);
 server.AnyEventRaised += e => Console.WriteLine(e.Message);
 
@@ -84,6 +84,7 @@ process.StartInfo.UseShellExecute = false;
 var readTask = Task.Run(server.ReadAll);
 process.Start();
 process.WaitForExit();
+server.StopListening();
 readTask.Wait();
 ```
 
@@ -110,6 +111,7 @@ process.StartInfo.UseShellExecute = false;
 var readTask = Task.Run(server.ReadAll);
 process.Start();
 process.WaitForExit();
+server.StopListening();
 readTask.Wait();
 ```
 
@@ -119,7 +121,7 @@ readTask.Wait();
 using System.Diagnostics;
 using XenoAtom.MsBuildPipeLogger;
 
-var pipeName = $"build-events-{Guid.NewGuid():N}";
+var pipeName = PipeLoggerServer.CreateUniquePipeName("build-events");
 using var server = new NamedPipeLoggerServer(pipeName);
 server.AnyEventRaised += e => Console.WriteLine(e.Message);
 
@@ -135,6 +137,7 @@ process.StartInfo.UseShellExecute = false;
 var readTask = Task.Run(server.ReadAll);
 process.Start();
 process.WaitForExit();
+server.StopListening();
 readTask.Wait();
 ```
 
@@ -146,4 +149,49 @@ The logger accepts a small semicolon-separated parameter set:
 - `name=<pipeName>`: connect to a local named pipe.
 - `name=<pipeName>;server=<serverName>`: connect to a named pipe on a specific server.
 
-`Read()` returns the next `PipeBuildEventArgs` and blocks until an event is available, the transport closes, or cancellation/disposal unblocks the server. `ReadAll()` keeps dispatching events until the stream ends or a `PipeBuildFinishedEventArgs` is received.
+`Read()` returns the next `PipeBuildEventArgs` and blocks until an event is available, the transport closes, or cancellation/disposal unblocks the server. `ReadAll()` keeps dispatching events until the transport closes.
+
+## Build submissions and ending a read
+
+MSBuild attaches a logger once per *build submission*, and one command can be several submissions. `dotnet build` is the common case: restore has to run without a `TargetFramework` global property, so it cannot share a submission with the build pass, and `dotnet build -f <tfm>` therefore runs two. The logger connects and disconnects once per submission, so a single child process opens **several sequential pipe connections**.
+
+`NamedPipeLoggerServer` serves all of them by default, which means a client disconnecting no longer implies the build is over and `ReadAll()` cannot know that the last client has been and gone. Call `StopListening()` once the process you are observing has exited:
+
+```csharp
+var readTask = Task.Run(server.ReadAll);
+process.Start();
+process.WaitForExit();
+server.StopListening();   // stop accepting clients, then drain what has already arrived
+readTask.Wait();
+```
+
+Use `StopListening()` rather than `Dispose()` to finish a read. `Dispose()` tears the transport down immediately and can discard events that were received but not yet handed to you; `StopListening()` stops accepting new clients and lets the backlog drain first.
+
+If you know there is exactly one submission — you are invoking `dotnet msbuild`, or `dotnet build --no-restore` with restore driven separately — you can opt out and let the read end when the client disconnects:
+
+```csharp
+using var server = new NamedPipeLoggerServer(pipeName, acceptMultipleConnections: false);
+```
+
+`AnonymousPipeLoggerServer` always serves a single connection, so `StopListening()` is a no-op there.
+
+> **Breaking change in this release.** A `process.WaitForExit(); readTask.Wait();` sequence written against an earlier version needs `server.StopListening()` inserted between the two lines. Without it `readTask` waits for a submission that will never arrive. It fails immediately and consistently rather than intermittently.
+
+## Pipe names on Unix
+
+On Unix a named pipe is a Unix domain socket at `$TMPDIR/CoreFxPipe_<name>`, and the operating system caps the **whole path** at 104 bytes. macOS's per-user `TMPDIR` is long, so the fixed overhead is around 60 characters and only ~44 are left for the name:
+
+```
+/var/folders/w2/cgg8mtk97gb9_bvg4y108wz00000gn/T/   49
+CoreFxPipe_                                        11
+```
+
+A name like `$"myapp-build-{Guid.NewGuid():N}"` (45 characters) therefore throws, and the error talks about a `path` parameter you never passed. Use the helpers instead of hand-rolling a name:
+
+```csharp
+var pipeName = PipeLoggerServer.CreateUniquePipeName();            // always fits
+var pipeName = PipeLoggerServer.CreateUniquePipeName("myapp");     // prefixed, truncated if needed
+var maximum  = PipeLoggerServer.GetMaximumPipeNameLength();        // if you must build your own
+```
+
+`CreateUniquePipeName` keeps the unique portion intact and truncates the prefix, so shortening never costs uniqueness. Passing an over-long name to `NamedPipeLoggerServer` throws an `ArgumentException` that names both the pipe and the helper.
