@@ -194,7 +194,17 @@ public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
         // On Unix the instance count doubles as the listen backlog, so a submission that connects while the
         // previous one is still being drained needs room to queue instead of being refused.
         var maximumServerInstances = acceptMultipleConnections ? NamedPipeServerStream.MaxAllowedServerInstances : 1;
-        return new NamedPipeServerStream(pipeName, PipeDirection.In, maximumServerInstances);
+
+        // Overlapped, because both the accept and every read block a dedicated thread on an async call to
+        // get a CancellationToken. On a non-overlapped Windows handle those calls are emulated by running
+        // the blocking call on a pool thread, which parks a second thread per operation and, before .NET
+        // Core, could not cancel one already in flight — the stop would be silently ignored.
+        return new NamedPipeServerStream(
+            pipeName,
+            PipeDirection.In,
+            maximumServerInstances,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous);
     }
 
     /// <summary>
