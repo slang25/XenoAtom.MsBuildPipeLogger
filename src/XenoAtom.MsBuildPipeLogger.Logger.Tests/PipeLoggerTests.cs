@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 // See license.txt file in the project root for full license information.
 
+using System.IO.Pipes;
 using Microsoft.Build.Framework;
 
 namespace XenoAtom.MsBuildPipeLogger.Logger.Tests;
@@ -130,11 +131,68 @@ public class PipeLoggerTests
         }
     }
 
+    [TestMethod]
+    public void Initialize_WhenThePipeCannotBeOpened_DoesNotFailTheBuild()
+    {
+        var logger = new UnopenablePipeLogger();
+        var eventSource = new TestEventSource();
+
+        // MSBuild turns an exception out of Initialize into a hard MSB4016 build failure, so a pipe that
+        // cannot be opened has to leave the build unlogged rather than kill it.
+        logger.Initialize(eventSource);
+
+        // Events still have somewhere harmless to go.
+        eventSource.RaiseAnyEvent(new BuildMessageEventArgs("m", null, null, MessageImportance.Normal));
+        logger.Shutdown();
+    }
+
+    [TestMethod]
+    public void Initialize_WhenThePipeCannotBeOpened_RestoresEnvironmentVariables()
+    {
+        var oldLogImports = Environment.GetEnvironmentVariable("MSBUILDLOGIMPORTS");
+        try
+        {
+            Environment.SetEnvironmentVariable("MSBUILDLOGIMPORTS", "existing");
+
+            new UnopenablePipeLogger().Initialize(new TestEventSource());
+
+            // A failed initialize must not leave the process-wide variables raised for later builds.
+            Assert.AreEqual("existing", Environment.GetEnvironmentVariable("MSBUILDLOGIMPORTS"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("MSBUILDLOGIMPORTS", oldLogImports);
+        }
+    }
+
+    [TestMethod]
+    public void Initialize_OnASecondSubmissionOverAnAnonymousPipe_DoesNotFailTheBuild()
+    {
+        using var server = new AnonymousPipeServerStream(PipeDirection.In, HandleInheritability.Inheritable);
+        var logger = new PipeLogger { Parameters = server.GetClientHandleAsString() };
+
+        logger.Initialize(new TestEventSource());
+
+        // Shutdown disposes the client stream, which closes the handle for good.
+        logger.Shutdown();
+
+        // MSBuild attaches the logger again for the next submission, and the handle cannot be reopened.
+        // That has to degrade to an unlogged submission rather than an MSB4016 build failure.
+        logger.Initialize(new TestEventSource());
+        logger.Shutdown();
+    }
+
     private sealed class TestPipeLogger : PipeLogger
     {
         public TestPipeWriter Writer { get; } = new();
 
         protected override IPipeWriter InitializePipeWriter() => Writer;
+    }
+
+    private sealed class UnopenablePipeLogger : PipeLogger
+    {
+        protected override IPipeWriter InitializePipeWriter() =>
+            throw new IOException("The pipe handle cannot be reopened.");
     }
 
     private sealed class TestPipeWriter : IPipeWriter

@@ -38,7 +38,24 @@ public class PipeLogger : Logger
         }
 
         InitializeEnvironmentVariables();
-        Pipe = InitializePipeWriter();
+
+        try
+        {
+            Pipe = InitializePipeWriter();
+        }
+        catch (Exception)
+        {
+            // A logger that cannot reach its pipe must not tear down the build it is observing, for the
+            // same reason a failed write does not. MSBuild turns an exception from Initialize into a hard
+            // MSB4016 build failure, so the build continues unlogged instead.
+            //
+            // An anonymous pipe reaches this on any build submission after the first: Shutdown disposes the
+            // client stream, which closes the inherited handle, and a handle cannot be reopened. Named pipes
+            // reconnect per submission and are the transport to use when a build may run more than one.
+            RestoreEnvironmentVariables();
+            return;
+        }
+
         InitializeEvents(eventSource);
     }
 

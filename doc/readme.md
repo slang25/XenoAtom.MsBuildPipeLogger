@@ -54,8 +54,8 @@ The wire format is **append-only**: fields are only ever added to the end of a r
 
 The bundled `netstandard2.0` logger currently supports:
 
-- Anonymous pipes: pass the server's client handle as the logger parameter.
-- Named pipes: pass `name=<pipeName>` and optionally `server=<serverName>`.
+- Anonymous pipes: pass the server's client handle as the logger parameter. Serves exactly one build submission — see [below](#anonymous-pipes-serve-exactly-one-submission).
+- Named pipes: pass `name=<pipeName>` and optionally `server=<serverName>`. Serves every submission, so this is the one to use with `dotnet build`.
 
 Unix domain sockets are not exposed because the logger must remain a single `netstandard2.0` assembly and the required socket endpoint API is not available there without reflection-based workarounds.
 
@@ -173,7 +173,13 @@ If you know there is exactly one submission — you are invoking `dotnet msbuild
 using var server = new NamedPipeLoggerServer(pipeName, acceptMultipleConnections: false);
 ```
 
-`AnonymousPipeLoggerServer` always serves a single connection, so `StopListening()` is a no-op there.
+### Anonymous pipes serve exactly one submission
+
+`AnonymousPipeLoggerServer` reaches its client through an inherited handle, and the logger closes that handle when the submission ends. A handle cannot be reopened, so the second submission of a `dotnet build` has no pipe to write to and goes unlogged. **Use a named pipe whenever the build may run more than one submission** — which includes plain `dotnet build`, because restore and build are separate submissions.
+
+The logger does not fail the build when this happens; it leaves the later submissions unlogged, on the principle that a logger must not tear down the build it is observing. You will see the events of the first submission only.
+
+`StopListening()` is a no-op on an anonymous pipe, because there is a single client and the read already ends when that client goes away — normally when the build process exits, so the `WaitForExit`/`StopListening`/`Wait` sequence above still works unchanged. To end an anonymous read *early*, `Dispose()` is the only lever, and it can discard events that were received but not yet handed to you.
 
 > **Breaking change in this release.** A `process.WaitForExit(); readTask.Wait();` sequence written against an earlier version needs `server.StopListening()` inserted between the two lines. Without it `readTask` waits for a submission that will never arrive. It fails immediately and consistently rather than intermittently.
 

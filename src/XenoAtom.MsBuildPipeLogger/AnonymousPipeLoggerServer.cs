@@ -9,6 +9,18 @@ namespace XenoAtom.MsBuildPipeLogger;
 /// <summary>
 /// A server for receiving MSBuild logging events over an anonymous pipe.
 /// </summary>
+/// <remarks>
+/// <para>
+/// An anonymous pipe serves exactly one build submission. The client is reached through an inherited handle,
+/// and the logger closes that handle when the submission ends, so it cannot be reopened for a second one.
+/// MSBuild attaches a logger once per submission and <c>dotnet build</c> runs restore and build as separate
+/// submissions, so use <see cref="NamedPipeLoggerServer"/> when a build may run more than one. A logger that
+/// cannot reopen the pipe leaves the later submissions unlogged rather than failing the build.
+/// </para>
+/// <para>
+/// A read here ends on its own when the client goes away, so <see cref="StopListening"/> has nothing to do.
+/// </para>
+/// </remarks>
 public class AnonymousPipeLoggerServer : PipeLoggerServer<AnonymousPipeServerStream>
 {
     private readonly object _clientHandleLock = new();
@@ -49,6 +61,19 @@ public class AnonymousPipeLoggerServer : PipeLoggerServer<AnonymousPipeServerStr
         {
             return _clientHandle ?? (_clientHandle = PipeStream.GetClientHandleAsString());
         }
+    }
+
+    /// <summary>
+    /// Does nothing, because an anonymous pipe serves a single client and the read ends when that client
+    /// closes its handle — normally by the build process exiting.
+    /// </summary>
+    /// <remarks>
+    /// Present so that the documented <c>WaitForExit</c>/<c>StopListening</c>/<c>Wait</c> pattern is valid on
+    /// either transport. To end a read before the client has finished, <see cref="Dispose"/> is the only
+    /// lever here, and it can discard events that have been received but not yet handed to the caller.
+    /// </remarks>
+    public override void StopListening()
+    {
     }
 
     /// <inheritdoc/>

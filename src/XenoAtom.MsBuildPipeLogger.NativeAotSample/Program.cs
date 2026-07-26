@@ -32,7 +32,7 @@ File.WriteAllText(
     "  </Target>" + Environment.NewLine +
     "</Project>" + Environment.NewLine);
 
-var pipeName = "xenoatom-aot-" + Guid.NewGuid().ToString("N");
+var pipeName = PipeLoggerServer.CreateUniquePipeName("xenoatom-aot");
 
 var sawBuildStarted = false;
 var buildSucceeded = false;
@@ -52,7 +52,8 @@ try
     };
     server.AnyEventRaised += e => Console.WriteLine("  event: " + e.GetType().Name + " -> " + e.Message);
 
-    // ReadAll blocks until PipeBuildFinishedEventArgs is seen or the pipe closes.
+    // The server keeps accepting connections (one MSBuild build can run several submissions), so ReadAll
+    // returns only once StopListening() is called after the observed process has exited.
     var readTask = Task.Run(server.ReadAll);
 
     using var process = new Process();
@@ -71,6 +72,9 @@ try
     var buildOutput = process.StandardOutput.ReadToEnd();
     var buildError = process.StandardError.ReadToEnd();
     process.WaitForExit();
+
+    // The build process has exited, so stop accepting further connections and let ReadAll drain and return.
+    server.StopListening();
 
     if (!readTask.Wait(TimeSpan.FromSeconds(60)))
     {

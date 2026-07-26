@@ -33,10 +33,19 @@ public interface IPipeLoggerServer : IDisposable
     /// pending <see cref="Read"/> or <see cref="ReadAll"/> can return.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Call this once the build process being observed has exited. Prefer it over <see cref="IDisposable.Dispose"/>
     /// to finish reading: <see cref="IDisposable.Dispose"/> tears the transport down immediately and can
     /// discard events that have been received but not yet handed to the caller. It is safe to call more
     /// than once and from any thread.
+    /// </para>
+    /// <para>
+    /// This only does something on a transport that accepts more than one connection, which is what makes a
+    /// read outlive any single client. On a single-connection transport such as
+    /// <see cref="AnonymousPipeLoggerServer"/> the read already ends by itself when the client goes away, so
+    /// this is a no-op and the pattern above still works; ending a read <em>early</em> there means
+    /// <see cref="IDisposable.Dispose"/>, with the event loss that implies.
+    /// </para>
     /// </remarks>
     void StopListening();
 }

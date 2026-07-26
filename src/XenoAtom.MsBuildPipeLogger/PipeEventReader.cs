@@ -225,7 +225,8 @@ internal sealed class PipeEventReader : IDisposable
     // each with the supplied item type (empty when none, as for target outputs).
     private static IReadOnlyList<PipeItem> ReadTaskItems(WireBufferReader r, string? itemType)
     {
-        var count = r.ReadCount();
+        // Each item is at least a spec string length prefix plus a metadata count (two bytes minimum).
+        var count = r.ReadCount(minimumElementSize: 2);
         if (count == 0)
         {
             return Array.Empty<PipeItem>();
@@ -284,7 +285,8 @@ internal sealed class PipeEventReader : IDisposable
 
     private static IReadOnlyList<PipeProperty> ReadProperties(WireBufferReader r)
     {
-        var count = r.ReadCount();
+        // Each property is at least a name string length prefix plus a nullable-value flag (two bytes minimum).
+        var count = r.ReadCount(minimumElementSize: 2);
         if (count == 0)
         {
             return Array.Empty<PipeProperty>();
@@ -303,7 +305,9 @@ internal sealed class PipeEventReader : IDisposable
 
     private static IReadOnlyList<PipeItem> ReadItems(WireBufferReader r)
     {
-        var count = r.ReadCount();
+        // Each item is at least an item-type and evaluated-include string length prefix plus a metadata
+        // count (three bytes minimum).
+        var count = r.ReadCount(minimumElementSize: 3);
         if (count == 0)
         {
             return Array.Empty<PipeItem>();

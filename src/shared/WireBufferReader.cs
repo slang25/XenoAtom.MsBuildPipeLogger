@@ -95,16 +95,19 @@ internal sealed class WireBufferReader
     }
 
     /// <summary>
-    /// Reads a 7-bit encoded element count and validates it against the bytes remaining. Every
-    /// serialized element occupies at least one byte, so a negative count or one exceeding
-    /// <see cref="Remaining"/> can only come from corrupt or hostile input and must be rejected
-    /// before it is used to size an allocation.
+    /// Reads a 7-bit encoded element count and validates it against the bytes remaining. Each serialized
+    /// element occupies at least <paramref name="minimumElementSize"/> bytes on the wire, so a count whose
+    /// elements could not fit in <see cref="Remaining"/> — or a negative count — can only come from corrupt
+    /// or hostile input and must be rejected before it is used to size an allocation. Bounding by the byte
+    /// budget rather than the count alone keeps a small record from sizing a large array (the array itself
+    /// costs several bytes per element, more than the one-byte wire minimum).
     /// </summary>
-    /// <exception cref="EndOfStreamException">The count is negative or exceeds the remaining payload.</exception>
-    public int ReadCount()
+    /// <param name="minimumElementSize">The smallest number of bytes a single element can occupy on the wire.</param>
+    /// <exception cref="EndOfStreamException">The count is negative or its elements exceed the remaining payload.</exception>
+    public int ReadCount(int minimumElementSize = 1)
     {
         var count = Read7Bit();
-        if (count < 0 || count > Remaining)
+        if (count < 0 || (long)count * minimumElementSize > Remaining)
         {
             throw new EndOfStreamException($"Element count {count} is negative or exceeds the {Remaining} bytes remaining in the record.");
         }
