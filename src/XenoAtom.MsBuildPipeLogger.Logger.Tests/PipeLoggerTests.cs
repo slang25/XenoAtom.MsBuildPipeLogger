@@ -73,10 +73,35 @@ public class PipeLoggerTests
         {
             var logger = new TestPipeLogger();
             logger.Initialize(new TestEventSource());
-            logger.Shutdown();
 
             Assert.AreEqual("true", Environment.GetEnvironmentVariable("MSBUILDTARGETOUTPUTLOGGING"));
             Assert.AreEqual("1", Environment.GetEnvironmentVariable("MSBUILDLOGIMPORTS"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("MSBUILDTARGETOUTPUTLOGGING", oldTargetOutputLogging);
+            Environment.SetEnvironmentVariable("MSBUILDLOGIMPORTS", oldLogImports);
+        }
+    }
+
+    [TestMethod]
+    public void Shutdown_RestoresMsBuildEnvironmentVariables()
+    {
+        // MSBuild reuses nodes between builds, so a variable left set here would keep inflating the
+        // event volume of later, unrelated builds running in the same process.
+        var oldTargetOutputLogging = Environment.GetEnvironmentVariable("MSBUILDTARGETOUTPUTLOGGING");
+        var oldLogImports = Environment.GetEnvironmentVariable("MSBUILDLOGIMPORTS");
+        try
+        {
+            Environment.SetEnvironmentVariable("MSBUILDTARGETOUTPUTLOGGING", null);
+            Environment.SetEnvironmentVariable("MSBUILDLOGIMPORTS", "preexisting");
+
+            var logger = new TestPipeLogger();
+            logger.Initialize(new TestEventSource());
+            logger.Shutdown();
+
+            Assert.IsNull(Environment.GetEnvironmentVariable("MSBUILDTARGETOUTPUTLOGGING"));
+            Assert.AreEqual("preexisting", Environment.GetEnvironmentVariable("MSBUILDLOGIMPORTS"));
         }
         finally
         {

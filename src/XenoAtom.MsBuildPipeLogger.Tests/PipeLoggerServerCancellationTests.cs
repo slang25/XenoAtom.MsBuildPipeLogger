@@ -130,7 +130,7 @@ public class PipeLoggerServerCancellationTests
         return await Task.Run(server.Read).WaitAsync(TestTimeout).ConfigureAwait(false);
     }
 
-    private static string CreatePipeName() => $"xenoatom-msbuild-{Guid.NewGuid():N}";
+    private static string CreatePipeName() => NamedPipeLoggerServer.CreatePipeName("xa-");
 
     private sealed class SocketExceptionOnCancellationServer : PipeLoggerServer<AnonymousPipeServerStream>
     {

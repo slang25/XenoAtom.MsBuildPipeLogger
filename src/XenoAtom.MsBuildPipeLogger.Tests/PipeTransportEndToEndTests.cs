@@ -38,8 +38,10 @@ public class PipeTransportEndToEndTests
     }
 
     [TestMethod]
-    public async Task ReadAll_StopsAfterBuildFinishedEvent()
+    public async Task ReadAll_KeepsReadingAfterBuildFinishedEvent()
     {
+        // BuildFinished marks the end of an MSBuild submission, not the end of the transport, so it
+        // must not stop the drain: a build with more than one submission keeps writing afterwards.
         var pipeName = CreatePipeName();
         using var server = new NamedPipeLoggerServer(pipeName);
         var events = SubscribeAnyEvents(server);
@@ -51,7 +53,9 @@ public class PipeTransportEndToEndTests
         }
 
         await WaitForReadAllAsync(readTask, server).ConfigureAwait(false);
-        BuildEventAssertions.AssertEvents(events, messageCount: 1, includeBuildFinished: true);
+        Assert.AreEqual(4, events.Count);
+        Assert.IsInstanceOfType(events[3], typeof(BuildMessageEventArgs));
+        Assert.AreEqual("After finish", events[3].Message);
     }
 
     [TestMethod]
@@ -137,7 +141,7 @@ public class PipeTransportEndToEndTests
         BuildEventAssertions.AssertEvents(events, messageCount, includeBuildFinished: true);
     }
 
-    private static string CreatePipeName() => $"xenoatom-msbuild-{Guid.NewGuid():N}";
+    private static string CreatePipeName() => NamedPipeLoggerServer.CreatePipeName("xa-");
 
     private static List<BuildEventArgs> SubscribeAnyEvents(EventArgsDispatcher server)
     {
@@ -162,6 +166,9 @@ public class PipeTransportEndToEndTests
 
     private static async Task WaitForReadAllAsync(Task readTask, IPipeLoggerServer server)
     {
+        // A named pipe server keeps listening for the next submission, so the consumer is the one
+        // that decides the build is over. StopListening drains what has arrived; Dispose would not.
+        server.StopListening();
         try
         {
             await readTask.WaitAsync(TestTimeout).ConfigureAwait(false);
@@ -189,7 +196,9 @@ public class PipeTransportEndToEndTests
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
-            await Task.WhenAll(readTask, process.WaitForExitAsync()).WaitAsync(TestTimeout).ConfigureAwait(false);
+            await process.WaitForExitAsync().WaitAsync(TestTimeout).ConfigureAwait(false);
+            server.StopListening();
+            await readTask.WaitAsync(TestTimeout).ConfigureAwait(false);
             WriteLine($"Exited process {process.Id} with code {process.ExitCode}");
             return process.ExitCode;
         }

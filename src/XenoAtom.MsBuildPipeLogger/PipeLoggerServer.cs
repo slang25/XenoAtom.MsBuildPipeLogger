@@ -5,6 +5,7 @@
 using System.IO.Pipes;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Text;
 using Microsoft.Build.Framework;
 using Microsoft.Build.Logging;
 
@@ -20,12 +21,14 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
 {
     private static readonly TimeSpan ReaderShutdownTimeout = TimeSpan.FromSeconds(5);
 
-    private readonly BinaryReader _binaryReader;
-    private readonly BuildEventArgsReader _buildEventArgsReader;
+    private readonly int _fileFormatVersion;
     private readonly CancellationTokenRegistration _cancellationRegistration;
     private readonly object _readLock = new();
     private readonly Thread _readerThread;
+    private BinaryReader _binaryReader;
+    private BuildEventArgsReader _buildEventArgsReader;
     private int _disposed;
+    private int _listeningStopped;
     private int _pipeShutdownRequested;
     private int _started;
 
@@ -40,6 +43,16 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
     /// Gets the token used to cancel read operations.
     /// </summary>
     protected CancellationToken CancellationToken { get; }
+
+    /// <summary>
+    /// Gets a value indicating whether the server has been disposed or its cancellation token was triggered.
+    /// </summary>
+    protected bool IsShutdownRequested => Volatile.Read(ref _disposed) != 0 || CancellationToken.IsCancellationRequested;
+
+    /// <summary>
+    /// Gets a value indicating whether <see cref="StopListening"/> was called.
+    /// </summary>
+    protected bool IsListeningStopped => Volatile.Read(ref _listeningStopped) != 0;
 
     /// <summary>
     /// Creates a server that receives MSBuild events over a specified pipe.
@@ -72,8 +85,9 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
     protected PipeLoggerServer(TPipeStream pipeStream, CancellationToken cancellationToken, bool autoStart)
     {
         PipeStream = pipeStream ?? throw new ArgumentNullException(nameof(pipeStream));
-        _binaryReader = new BinaryReader(Buffer);
-        _buildEventArgsReader = new BuildEventArgsReader(_binaryReader, GetBinaryLoggerFileFormatVersion());
+        _fileFormatVersion = GetBinaryLoggerFileFormatVersion();
+        _binaryReader = CreateBinaryReader();
+        _buildEventArgsReader = new BuildEventArgsReader(_binaryReader, _fileFormatVersion);
         CancellationToken = cancellationToken;
         if (cancellationToken.CanBeCanceled)
         {
@@ -99,6 +113,25 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
     protected abstract void Connect();
 
     /// <summary>
+    /// Waits for the next client after the current client disconnected. Implementations that support
+    /// more than one connection must not tear the listener down, otherwise a client can arrive while
+    /// nothing is listening.
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> if another client connected and its events should be read; otherwise
+    /// <see langword="false"/> to stop reading. The base implementation always returns <see langword="false"/>.
+    /// </returns>
+    protected virtual bool Reconnect() => false;
+
+    /// <summary>
+    /// Unblocks a pending wait for the next client so that the reader can finish. The base
+    /// implementation does nothing.
+    /// </summary>
+    protected virtual void StopAcceptingConnections()
+    {
+    }
+
+    /// <summary>
     /// Starts the background reader thread.
     /// </summary>
     /// <exception cref="InvalidOperationException">The reader thread was already started.</exception>
@@ -117,8 +150,20 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
         try
         {
             Connect();
-            while (Buffer.FillFromStream(PipeStream, CancellationToken))
+            while (true)
             {
+                while (Buffer.FillFromStream(PipeStream, CancellationToken))
+                {
+                }
+
+                if (!Reconnect())
+                {
+                    break;
+                }
+
+                // Queued only once the next client is connected, which keeps it ordered ahead of that
+                // client's bytes and tells the consumer to reset its event reader first.
+                Buffer.MarkConnectionBoundary();
             }
         }
         catch (IOException)
@@ -169,48 +214,65 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
     /// <inheritdoc/>
     public BuildEventArgs? Read()
     {
-        if (Volatile.Read(ref _disposed) != 0 || Buffer.IsCompleted)
+        while (true)
         {
-            return null;
-        }
+            if (Volatile.Read(ref _disposed) != 0 || Buffer.IsCompleted)
+            {
+                return null;
+            }
 
-        try
-        {
             lock (_readLock)
             {
-                var args = _buildEventArgsReader.Read();
-                if (args is not null)
+                try
                 {
-                    Dispatch(args);
-                    return args;
+                    var args = _buildEventArgsReader.Read();
+                    if (args is not null)
+                    {
+                        Dispatch(args);
+                        return args;
+                    }
                 }
+                catch (EndOfStreamException)
+                {
+                    // The stream may have been closed or otherwise stopped, or the current client
+                    // disconnected. TryConsumeConnectionBoundary below tells the two apart.
+                }
+                catch (ObjectDisposedException)
+                {
+                    // The server was disposed while reading.
+                }
+
+                if (Volatile.Read(ref _disposed) != 0 || !Buffer.TryConsumeConnectionBoundary())
+                {
+                    return null;
+                }
+
+                // Every client writes with its own event writer, and that writer restarts the string
+                // table it emits indexes into. Carrying the reader across a connection would silently
+                // resolve the next client's indexes against the previous client's strings, so the
+                // reader is rebuilt for each connection.
+                ResetEventArgsReader();
             }
         }
-        catch (EndOfStreamException)
-        {
-            // The stream may have been closed or otherwise stopped.
-        }
-        catch (ObjectDisposedException)
-        {
-            // The server was disposed while reading.
-        }
-
-        return null;
     }
 
     /// <inheritdoc/>
     public void ReadAll()
     {
-        var args = Read();
-        while (args is not null)
+        while (Read() is not null)
         {
-            if (args is BuildFinishedEventArgs)
-            {
-                return;
-            }
-
-            args = Read();
         }
+    }
+
+    /// <inheritdoc/>
+    public void StopListening()
+    {
+        if (Interlocked.Exchange(ref _listeningStopped, 1) != 0)
+        {
+            return;
+        }
+
+        StopAcceptingConnections();
     }
 
     /// <inheritdoc/>
@@ -235,6 +297,19 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
             _binaryReader.Dispose();
             Buffer.Dispose();
         }
+    }
+
+    private BinaryReader CreateBinaryReader() =>
+        // The buffer outlives the reader because a new reader is created for each connection, so the
+        // reader must not close it.
+        new(Buffer, Encoding.UTF8, leaveOpen: true);
+
+    private void ResetEventArgsReader()
+    {
+        _buildEventArgsReader.Dispose();
+        _binaryReader.Dispose();
+        _binaryReader = CreateBinaryReader();
+        _buildEventArgsReader = new BuildEventArgsReader(_binaryReader, _fileFormatVersion);
     }
 
     private void RequestPipeShutdown()
