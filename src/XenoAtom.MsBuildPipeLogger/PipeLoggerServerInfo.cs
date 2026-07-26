@@ -28,6 +28,15 @@ public static class PipeLoggerServer
     private const int UnixMaximumSocketPathLength = 104;
 
     /// <summary>
+    /// The path stored in <c>sockaddr_un.sun_path</c> is null-terminated, so one byte of the field is
+    /// reserved for the terminator and the usable path length is one less than the field size. Omitting
+    /// this makes a name of exactly the reported maximum bind-fail with the confusing
+    /// <see cref="ArgumentOutOfRangeException"/> about a <c>path</c> parameter that the length limit exists
+    /// to prevent.
+    /// </summary>
+    private const int UnixSocketPathTerminatorLength = 1;
+
+    /// <summary>
     /// The file name prefix <see cref="System.IO.Pipes"/> gives the domain socket backing a Unix pipe.
     /// </summary>
     private const string UnixPipePathPrefix = "CoreFxPipe_";
@@ -57,7 +66,7 @@ public static class PipeLoggerServer
         }
 
         var prefixLength = Encoding.UTF8.GetByteCount(Path.Combine(Path.GetTempPath(), UnixPipePathPrefix));
-        var available = UnixMaximumSocketPathLength - prefixLength;
+        var available = UnixMaximumSocketPathLength - UnixSocketPathTerminatorLength - prefixLength;
         return available > 0 ? available : 0;
     }
 

@@ -78,9 +78,24 @@ public class PipeNameLengthTests
             return;
         }
 
-        // The name has to share a 104 byte socket path with the temp directory and the CoreFxPipe_ prefix.
+        // The name has to share a 104 byte socket path with the temp directory, the CoreFxPipe_ prefix,
+        // and the one byte reserved for the path's null terminator.
         var prefixLength = Encoding.UTF8.GetByteCount(Path.Combine(Path.GetTempPath(), "CoreFxPipe_"));
-        Assert.AreEqual(104 - prefixLength, maximum);
+        Assert.AreEqual(104 - 1 - prefixLength, maximum);
+    }
+
+    [TestMethod]
+    public void NamedPipeLoggerServer_WithMaximumLengthName_IsAcceptedByTheServer()
+    {
+        // The reported maximum must actually bind: the socket path is null-terminated, so a name that is
+        // one byte too long fails with the same ArgumentOutOfRangeException about a 'path' parameter that
+        // the length limit exists to prevent.
+        var maximum = PipeLoggerServer.GetMaximumPipeNameLength();
+        var atLimit = new string('p', maximum);
+
+        using var server = new NamedPipeLoggerServer(atLimit);
+
+        Assert.AreEqual(atLimit, server.PipeName);
     }
 
     [TestMethod]

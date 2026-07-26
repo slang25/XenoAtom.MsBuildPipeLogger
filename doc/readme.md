@@ -185,7 +185,7 @@ The logger does not fail the build when this happens; it leaves the later submis
 
 ## Pipe names on Unix
 
-On Unix a named pipe is a Unix domain socket at `$TMPDIR/CoreFxPipe_<name>`, and the operating system caps the **whole path** at 104 bytes. macOS's per-user `TMPDIR` is long, so the fixed overhead is around 60 characters and only ~44 are left for the name:
+On Unix a named pipe is a Unix domain socket at `$TMPDIR/CoreFxPipe_<name>`, and the operating system caps the **whole path** at 104 bytes, one of which is reserved for a null terminator. macOS's per-user `TMPDIR` is long, so the fixed overhead is around 60 characters and only ~43 are left for the name:
 
 ```
 /var/folders/w2/cgg8mtk97gb9_bvg4y108wz00000gn/T/   49
