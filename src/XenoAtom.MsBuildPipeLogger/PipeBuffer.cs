@@ -17,6 +17,10 @@ internal class PipeBuffer : Stream
 
     private Buffer? _current;
 
+    // Only ever touched by the consumer side (PipeLoggerServer serializes reads under its own lock), so
+    // this needs no synchronization of its own. The producer side only ever enqueues markers.
+    private bool _connectionBoundaryPending;
+
     public void CompleteAdding()
     {
         try
@@ -75,6 +79,44 @@ internal class PipeBuffer : Stream
         return false;
     }
 
+    /// <summary>
+    /// Marks the end of one client's byte stream. A read will not cross this point until the consumer
+    /// acknowledges it with <see cref="TryConsumeConnectionBoundary"/>.
+    /// </summary>
+    public bool WriteConnectionBoundary()
+    {
+        try
+        {
+            _queue.Add(Buffer.CreateConnectionBoundary());
+            return true;
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Acknowledges a connection boundary that a read stopped at, allowing reads to continue into the
+    /// next client's bytes.
+    /// </summary>
+    /// <returns><see langword="true"/> if a boundary was pending, meaning more clients may follow;
+    /// <see langword="false"/> if the transport itself has run out.</returns>
+    public bool TryConsumeConnectionBoundary()
+    {
+        if (!_connectionBoundaryPending)
+        {
+            return false;
+        }
+
+        _connectionBoundaryPending = false;
+        return true;
+    }
+
     public bool TryWriteEndOfFile()
     {
         try
@@ -111,29 +153,42 @@ internal class PipeBuffer : Stream
     {
         ValidateReadWriteArguments(buffer, offset, count);
 
+        // A record left half-written by a client that died belongs to that client alone. Reporting the end
+        // of the stream here makes the reader discard it, instead of letting its length prefix run on and
+        // swallow the next client's bytes.
+        if (_connectionBoundaryPending)
+        {
+            return 0;
+        }
+
         var read = 0;
         while (read < count)
         {
             // Ensure a buffer is available
             var current = TakeBuffer();
-            if (current is not null)
-            {
-                // Get as much as we can from the current buffer
-                read += current.Read(buffer, offset + read, count - read);
-                if (current.Count == 0)
-                {
-                    // Used up this buffer, return to the pool if it's a pool buffer
-                    if (current.FromPool)
-                    {
-                        _pool.Add(current);
-                    }
-
-                    _current = null;
-                }
-            }
-            else
+            if (current is null)
             {
                 break;
+            }
+
+            if (current.IsConnectionBoundary)
+            {
+                _connectionBoundaryPending = true;
+                _current = null;
+                break;
+            }
+
+            // Get as much as we can from the current buffer
+            read += current.Read(buffer, offset + read, count - read);
+            if (current.Count == 0)
+            {
+                // Used up this buffer, return to the pool if it's a pool buffer
+                if (current.FromPool)
+                {
+                    _pool.Add(current);
+                }
+
+                _current = null;
             }
         }
 
@@ -212,6 +267,11 @@ internal class PipeBuffer : Stream
 
         public bool FromPool { get; }
 
+        /// <summary>
+        /// Marks the end of one client's byte stream rather than carrying data.
+        /// </summary>
+        public bool IsConnectionBoundary { get; private init; }
+
         public Buffer()
         {
             _buffer = new byte[BufferSize];
@@ -224,6 +284,9 @@ internal class PipeBuffer : Stream
             System.Buffer.BlockCopy(buffer, offset, _buffer, 0, count);
             Count = count;
         }
+
+        public static Buffer CreateConnectionBoundary() =>
+            new(Array.Empty<byte>(), 0, 0) { IsConnectionBoundary = true };
 
         public int FillFromStream(Stream stream, CancellationToken cancellationToken)
         {

@@ -131,6 +131,10 @@ public abstract class PipeLoggerServer<TPipeStream> : PipeEventDispatcher, IPipe
             do
             {
                 DrainCurrentConnection();
+
+                // Fence off whatever this client sent, so a record it left half-written cannot run on
+                // into the next client's bytes.
+                Buffer.WriteConnectionBoundary();
             }
             while (TryAcceptNextConnection());
         }
@@ -189,28 +193,38 @@ public abstract class PipeLoggerServer<TPipeStream> : PipeEventDispatcher, IPipe
             return null;
         }
 
-        try
+        lock (_readLock)
         {
-            lock (_readLock)
+            while (true)
             {
-                var args = _eventReader.Read();
-                if (args is not null)
+                try
                 {
-                    Dispatch(args);
-                    return args;
+                    var args = _eventReader.Read();
+                    if (args is not null)
+                    {
+                        Dispatch(args);
+                        return args;
+                    }
+                }
+                catch (EndOfStreamException)
+                {
+                    // A record ran out of bytes part-way through. Whether that is the end of the transport
+                    // or just the end of one client is settled by the boundary check below.
+                }
+                catch (ObjectDisposedException)
+                {
+                    // The server was disposed while reading.
+                    return null;
+                }
+
+                // The record stream ran out. If a client simply went away, anything half-read belonged to
+                // it and the bytes that follow are a fresh record stream, so resume rather than stop.
+                if (!Buffer.TryConsumeConnectionBoundary())
+                {
+                    return null;
                 }
             }
         }
-        catch (EndOfStreamException)
-        {
-            // The stream may have been closed or otherwise stopped.
-        }
-        catch (ObjectDisposedException)
-        {
-            // The server was disposed while reading.
-        }
-
-        return null;
     }
 
     /// <inheritdoc/>
