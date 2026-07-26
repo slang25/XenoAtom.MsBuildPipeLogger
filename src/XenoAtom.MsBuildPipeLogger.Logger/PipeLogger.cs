@@ -15,6 +15,8 @@ namespace XenoAtom.MsBuildPipeLogger;
 /// </remarks>
 public class PipeLogger : Logger
 {
+    private readonly Dictionary<string, string?> _originalEnvironmentVariables = new(StringComparer.Ordinal);
+
     private IEventSource? _eventSource;
 
     /// <summary>
@@ -39,10 +41,50 @@ public class PipeLogger : Logger
     /// <summary>
     /// Initializes environment variables that enable additional MSBuild logging data.
     /// </summary>
+    /// <remarks>
+    /// Set variables through <see cref="SetEnvironmentVariable"/> so that <see cref="Shutdown"/> can
+    /// put them back. MSBuild reuses its nodes between builds by default, so a variable left behind
+    /// here would keep raising the event volume of later, unrelated builds in the same process.
+    /// </remarks>
     protected virtual void InitializeEnvironmentVariables()
     {
-        Environment.SetEnvironmentVariable("MSBUILDTARGETOUTPUTLOGGING", "true");
-        Environment.SetEnvironmentVariable("MSBUILDLOGIMPORTS", "1");
+        SetEnvironmentVariable("MSBUILDTARGETOUTPUTLOGGING", "true");
+        SetEnvironmentVariable("MSBUILDLOGIMPORTS", "1");
+    }
+
+    /// <summary>
+    /// Sets an environment variable for the duration of the build and remembers its previous value so
+    /// that <see cref="Shutdown"/> can restore it.
+    /// </summary>
+    /// <param name="name">The name of the environment variable.</param>
+    /// <param name="value">The value to set, or <see langword="null"/> to remove the variable.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="name"/> is <see langword="null"/>.</exception>
+    protected void SetEnvironmentVariable(string name, string? value)
+    {
+        if (name is null)
+        {
+            throw new ArgumentNullException(nameof(name));
+        }
+
+        if (!_originalEnvironmentVariables.ContainsKey(name))
+        {
+            _originalEnvironmentVariables[name] = Environment.GetEnvironmentVariable(name);
+        }
+
+        Environment.SetEnvironmentVariable(name, value);
+    }
+
+    /// <summary>
+    /// Restores every environment variable that was set through <see cref="SetEnvironmentVariable"/>.
+    /// </summary>
+    protected virtual void RestoreEnvironmentVariables()
+    {
+        foreach (var variable in _originalEnvironmentVariables)
+        {
+            Environment.SetEnvironmentVariable(variable.Key, variable.Value);
+        }
+
+        _originalEnvironmentVariables.Clear();
     }
 
     /// <summary>
@@ -79,6 +121,7 @@ public class PipeLogger : Logger
 
         Pipe?.Dispose();
         Pipe = null;
+        RestoreEnvironmentVariables();
     }
 
     private void OnAnyEventRaised(object sender, BuildEventArgs e)
