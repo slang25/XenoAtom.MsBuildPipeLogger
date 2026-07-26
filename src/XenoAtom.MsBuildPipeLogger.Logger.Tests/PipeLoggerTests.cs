@@ -73,14 +73,59 @@ public class PipeLoggerTests
         {
             var logger = new TestPipeLogger();
             logger.Initialize(new TestEventSource());
-            logger.Shutdown();
 
             Assert.AreEqual("true", Environment.GetEnvironmentVariable("MSBUILDTARGETOUTPUTLOGGING"));
             Assert.AreEqual("1", Environment.GetEnvironmentVariable("MSBUILDLOGIMPORTS"));
+
+            logger.Shutdown();
         }
         finally
         {
             Environment.SetEnvironmentVariable("MSBUILDTARGETOUTPUTLOGGING", oldTargetOutputLogging);
+            Environment.SetEnvironmentVariable("MSBUILDLOGIMPORTS", oldLogImports);
+        }
+    }
+
+    [TestMethod]
+    public void Shutdown_RestoresMsBuildEnvironmentVariables()
+    {
+        var oldTargetOutputLogging = Environment.GetEnvironmentVariable("MSBUILDTARGETOUTPUTLOGGING");
+        var oldLogImports = Environment.GetEnvironmentVariable("MSBUILDLOGIMPORTS");
+        try
+        {
+            // These are process-wide and MSBuild reuses nodes across builds, so a variable left set would
+            // raise the event volume of the next, unrelated build that lands on this node.
+            Environment.SetEnvironmentVariable("MSBUILDTARGETOUTPUTLOGGING", null);
+            Environment.SetEnvironmentVariable("MSBUILDLOGIMPORTS", "existing");
+
+            var logger = new TestPipeLogger();
+            logger.Initialize(new TestEventSource());
+            logger.Shutdown();
+
+            Assert.IsNull(Environment.GetEnvironmentVariable("MSBUILDTARGETOUTPUTLOGGING"));
+            Assert.AreEqual("existing", Environment.GetEnvironmentVariable("MSBUILDLOGIMPORTS"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("MSBUILDTARGETOUTPUTLOGGING", oldTargetOutputLogging);
+            Environment.SetEnvironmentVariable("MSBUILDLOGIMPORTS", oldLogImports);
+        }
+    }
+
+    [TestMethod]
+    public void Shutdown_WithoutInitialize_LeavesEnvironmentVariablesAlone()
+    {
+        var oldLogImports = Environment.GetEnvironmentVariable("MSBUILDLOGIMPORTS");
+        try
+        {
+            Environment.SetEnvironmentVariable("MSBUILDLOGIMPORTS", "existing");
+
+            new TestPipeLogger().Shutdown();
+
+            Assert.AreEqual("existing", Environment.GetEnvironmentVariable("MSBUILDLOGIMPORTS"));
+        }
+        finally
+        {
             Environment.SetEnvironmentVariable("MSBUILDLOGIMPORTS", oldLogImports);
         }
     }

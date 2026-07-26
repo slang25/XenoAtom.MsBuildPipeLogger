@@ -15,7 +15,13 @@ namespace XenoAtom.MsBuildPipeLogger;
 /// </remarks>
 public class PipeLogger : Logger
 {
+    private const string TargetOutputLoggingVariable = "MSBUILDTARGETOUTPUTLOGGING";
+    private const string LogImportsVariable = "MSBUILDLOGIMPORTS";
+
     private IEventSource? _eventSource;
+    private string? _previousTargetOutputLogging;
+    private string? _previousLogImports;
+    private bool _environmentVariablesInitialized;
 
     /// <summary>
     /// Gets the active pipe writer after the logger has been initialized.
@@ -37,12 +43,40 @@ public class PipeLogger : Logger
     }
 
     /// <summary>
-    /// Initializes environment variables that enable additional MSBuild logging data.
+    /// Initializes environment variables that enable additional MSBuild logging data, remembering the
+    /// previous values so that <see cref="RestoreEnvironmentVariables"/> can put them back.
     /// </summary>
     protected virtual void InitializeEnvironmentVariables()
     {
-        Environment.SetEnvironmentVariable("MSBUILDTARGETOUTPUTLOGGING", "true");
-        Environment.SetEnvironmentVariable("MSBUILDLOGIMPORTS", "1");
+        _previousTargetOutputLogging = Environment.GetEnvironmentVariable(TargetOutputLoggingVariable);
+        _previousLogImports = Environment.GetEnvironmentVariable(LogImportsVariable);
+        _environmentVariablesInitialized = true;
+
+        Environment.SetEnvironmentVariable(TargetOutputLoggingVariable, "true");
+        Environment.SetEnvironmentVariable(LogImportsVariable, "1");
+    }
+
+    /// <summary>
+    /// Restores the environment variables that <see cref="InitializeEnvironmentVariables"/> changed.
+    /// </summary>
+    /// <remarks>
+    /// These are process-wide, and with MSBuild node reuse the process outlives the build. Leaving them set
+    /// would raise the event volume of subsequent, unrelated builds that land on a reused node.
+    /// </remarks>
+    protected virtual void RestoreEnvironmentVariables()
+    {
+        if (!_environmentVariablesInitialized)
+        {
+            return;
+        }
+
+        _environmentVariablesInitialized = false;
+
+        // Setting a variable to null removes it, which is the correct restore when it was not set before.
+        Environment.SetEnvironmentVariable(TargetOutputLoggingVariable, _previousTargetOutputLogging);
+        Environment.SetEnvironmentVariable(LogImportsVariable, _previousLogImports);
+        _previousTargetOutputLogging = null;
+        _previousLogImports = null;
     }
 
     /// <summary>
@@ -79,6 +113,7 @@ public class PipeLogger : Logger
 
         Pipe?.Dispose();
         Pipe = null;
+        RestoreEnvironmentVariables();
     }
 
     private void OnAnyEventRaised(object sender, BuildEventArgs e)
