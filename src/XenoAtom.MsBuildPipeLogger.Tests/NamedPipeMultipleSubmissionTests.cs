@@ -2,6 +2,8 @@
 // Licensed under the MIT license.
 // See license.txt file in the project root for full license information.
 
+using System.Runtime.InteropServices;
+
 namespace XenoAtom.MsBuildPipeLogger.Tests;
 
 /// <summary>
@@ -145,6 +147,45 @@ public class NamedPipeMultipleSubmissionTests
 
             Assert.AreEqual(500, events.OfType<PipeBuildMessageEventArgs>().Count(), $"Attempt {attempt} lost events.");
         }
+    }
+
+    [TestMethod]
+    public async Task StopListening_WorksWhenTheServerCannotBeConnectedTo()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            Assert.Inconclusive("The socket path is a Unix implementation detail.");
+            return;
+        }
+
+        var pipeName = CreatePipeName();
+        using var server = new NamedPipeLoggerServer(pipeName);
+        var readTask = Task.Run(server.ReadAll);
+
+        // Give the listener time to reach the accept, then make the pipe unreachable for new clients.
+        await Task.Delay(200).ConfigureAwait(false);
+        var socketPath = Path.Combine(Path.GetTempPath(), "CoreFxPipe_" + pipeName);
+        Assert.IsTrue(File.Exists(socketPath), $"Expected a socket at '{socketPath}'.");
+        File.Delete(socketPath);
+
+        // Stopping must not depend on being able to connect to ourselves: an implementation that wakes the
+        // accept by opening a client connection hangs here forever, because that connection can no longer
+        // be made and the failure is invisible.
+        server.StopListening();
+
+        await readTask.WaitAsync(TestTimeout).ConfigureAwait(false);
+    }
+
+    [TestMethod]
+    public async Task StopListening_FromManyThreadsAtOnce_IsSafe()
+    {
+        var pipeName = CreatePipeName();
+        using var server = new NamedPipeLoggerServer(pipeName);
+        var readTask = Task.Run(server.ReadAll);
+
+        await Task.WhenAll(Enumerable.Range(0, 16).Select(_ => Task.Run(server.StopListening))).ConfigureAwait(false);
+
+        await readTask.WaitAsync(TestTimeout).ConfigureAwait(false);
     }
 
     [TestMethod]

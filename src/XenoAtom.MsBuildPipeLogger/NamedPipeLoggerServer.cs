@@ -20,15 +20,12 @@ namespace XenoAtom.MsBuildPipeLogger;
 /// </remarks>
 public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
 {
-    private const int UnblockConnectionTimeoutMilliseconds = 1000;
-
-    // Guards the two-step "observe the stop, then claim the connection wait" so that a stop can never land
-    // in between and leave the reader blocked on an accept with nothing left to wake it.
-    private readonly object _connectionLock = new();
+    // Cancelling the accept is the entire stop mechanism. A CancellationToken already makes "observe the
+    // stop" and "claim the wait" one atomic step: an accept started with a cancelled token never blocks,
+    // and one already blocked is cancelled. So there is no window in which a stop goes unnoticed and no
+    // need to wake the reader by connecting to ourselves.
+    private readonly CancellationTokenSource _stopListeningSource = new();
     private readonly CancellationTokenRegistration _cancellationRegistration;
-
-    private bool _stopListening;
-    private bool _waitingForConnection;
 
     /// <summary>
     /// Gets the named pipe name.
@@ -107,24 +104,15 @@ public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
     /// <inheritdoc/>
     public override void StopListening()
     {
-        bool unblock;
-        lock (_connectionLock)
+        try
         {
-            if (_stopListening)
-            {
-                return;
-            }
-
-            _stopListening = true;
-
-            // Only a reader parked in WaitForConnection has to be woken. One that is still draining a
-            // client will observe the flag itself when it comes back for the next connection.
-            unblock = _waitingForConnection;
+            // Cancelling is idempotent, and a reader that is mid-drain finishes handing over that client's
+            // events before it comes back to the accept and sees the cancellation.
+            _stopListeningSource.Cancel();
         }
-
-        if (unblock)
+        catch (ObjectDisposedException)
         {
-            UnblockConnectionWait();
+            // Already disposed, so the reader has been stopped by other means.
         }
     }
 
@@ -134,6 +122,9 @@ public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
         _cancellationRegistration.Dispose();
         StopListening();
         base.Dispose();
+
+        // Only after the base has joined the reader thread, so nothing is still waiting on the token.
+        _stopListeningSource.Dispose();
     }
 
     /// <inheritdoc/>
@@ -207,24 +198,17 @@ public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
     /// <returns><see langword="true"/> if a client connected and should be read.</returns>
     private bool WaitForNextConnection()
     {
-        lock (_connectionLock)
-        {
-            if (_stopListening)
-            {
-                return false;
-            }
-
-            _waitingForConnection = true;
-        }
-
         try
         {
-            PipeStream.WaitForConnection();
-
-            // Deliberately not re-checking the stop flag: a client that connected before the stop still
-            // has events to hand over, and the connection opened to unblock this wait sends nothing, so
-            // draining it simply returns and the loop then observes the flag.
+            // Blocking the dedicated reader thread on the async accept is what lets the stop cancel it.
+            // A client that connects before the cancellation is still accepted and drained in full.
+            PipeStream.WaitForConnectionAsync(_stopListeningSource.Token).GetAwaiter().GetResult();
             return true;
+        }
+        catch (OperationCanceledException)
+        {
+            // Asked to stop listening.
+            return false;
         }
         catch (IOException)
         {
@@ -236,44 +220,12 @@ public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
         }
         catch (SocketException)
         {
-            // Unix named pipes can surface disposal of WaitForConnection as a socket error.
+            // Unix named pipes can surface disposal of the accept as a socket error.
             return false;
         }
         catch (InvalidOperationException)
         {
             return false;
-        }
-        finally
-        {
-            lock (_connectionLock)
-            {
-                _waitingForConnection = false;
-            }
-        }
-    }
-
-    private void UnblockConnectionWait()
-    {
-        try
-        {
-            // Connecting a dummy client is what stops WaitForConnection. Checking IsConnected is not
-            // reliable here because a quick connect/disconnect may never be observed as connected.
-            using (var pipeStream = new NamedPipeClientStream(".", PipeName, PipeDirection.Out))
-            {
-                pipeStream.Connect(UnblockConnectionTimeoutMilliseconds);
-            }
-        }
-        catch (IOException)
-        {
-        }
-        catch (ObjectDisposedException)
-        {
-        }
-        catch (SocketException)
-        {
-        }
-        catch (TimeoutException)
-        {
         }
     }
 }
