@@ -21,13 +21,15 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
     private static readonly TimeSpan ReaderShutdownTimeout = TimeSpan.FromSeconds(5);
 
     private readonly BinaryReader _binaryReader;
-    private readonly BuildEventArgsReader _buildEventArgsReader;
+    private readonly int _fileFormatVersion;
     private readonly CancellationTokenRegistration _cancellationRegistration;
     private readonly object _readLock = new();
     private readonly Thread _readerThread;
+    private BuildEventArgsReader _buildEventArgsReader;
     private int _disposed;
     private int _pipeShutdownRequested;
     private int _started;
+    private int _stoppedAcceptingConnections;
 
     internal PipeBuffer Buffer { get; } = new();
 
@@ -73,7 +75,8 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
     {
         PipeStream = pipeStream ?? throw new ArgumentNullException(nameof(pipeStream));
         _binaryReader = new BinaryReader(Buffer);
-        _buildEventArgsReader = new BuildEventArgsReader(_binaryReader, GetBinaryLoggerFileFormatVersion());
+        _fileFormatVersion = GetBinaryLoggerFileFormatVersion();
+        _buildEventArgsReader = new BuildEventArgsReader(_binaryReader, _fileFormatVersion);
         CancellationToken = cancellationToken;
         if (cancellationToken.CanBeCanceled)
         {
@@ -99,6 +102,25 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
     protected abstract void Connect();
 
     /// <summary>
+    /// Disconnects the client that just closed the transport so that <see cref="Connect"/> can accept
+    /// the next one. Transports that only ever serve a single client return <see langword="false"/>.
+    /// </summary>
+    /// <returns><see langword="true"/> if the server can wait for another client; otherwise <see langword="false"/>.</returns>
+    protected virtual bool TryDisconnect() => false;
+
+    /// <summary>
+    /// Unblocks a pending <see cref="Connect"/> when the server is no longer interested in new clients.
+    /// </summary>
+    protected virtual void CancelConnectionWait()
+    {
+    }
+
+    /// <summary>
+    /// Gets a value indicating whether the background reader is still serving the transport.
+    /// </summary>
+    protected bool IsReading => Volatile.Read(ref _started) != 0 && _readerThread.IsAlive;
+
+    /// <summary>
     /// Starts the background reader thread.
     /// </summary>
     /// <exception cref="InvalidOperationException">The reader thread was already started.</exception>
@@ -116,9 +138,23 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
     {
         try
         {
-            Connect();
-            while (Buffer.FillFromStream(PipeStream, CancellationToken))
+            while (true)
             {
+                Connect();
+                var receivedData = false;
+                while (Buffer.FillFromStream(PipeStream, CancellationToken))
+                {
+                    receivedData = true;
+                }
+
+                if (!ShouldAcceptAnotherConnection(receivedData) || !TryDisconnect())
+                {
+                    break;
+                }
+
+                // Every connection carries its own independent binary log record stream, so the
+                // boundary has to reach the reader before the next client's bytes do.
+                Buffer.EndConnection();
             }
         }
         catch (IOException)
@@ -147,6 +183,27 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
             Buffer.TryWriteEndOfFile();
             Buffer.CompleteAdding();
         }
+    }
+
+    private bool ShouldAcceptAnotherConnection(bool receivedData)
+    {
+        if (Volatile.Read(ref _disposed) != 0
+            || Volatile.Read(ref _pipeShutdownRequested) != 0
+            || CancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+
+        if (Volatile.Read(ref _stoppedAcceptingConnections) == 0)
+        {
+            return true;
+        }
+
+        // Stopping cannot simply drop out here: a client that connected before the stop may still be
+        // waiting to be accepted, and its events would be lost. The connection opened to unblock Connect()
+        // is queued behind every such client and sends nothing, so an empty connection is what marks the
+        // point where they have all been drained.
+        return receivedData;
     }
 
     private static int GetBinaryLoggerFileFormatVersion()
@@ -178,17 +235,34 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
         {
             lock (_readLock)
             {
-                var args = _buildEventArgsReader.Read();
-                if (args is not null)
+                while (true)
                 {
-                    Dispatch(args);
-                    return args;
+                    try
+                    {
+                        var args = _buildEventArgsReader.Read();
+                        if (args is not null)
+                        {
+                            Dispatch(args);
+                            return args;
+                        }
+                    }
+                    catch (EndOfStreamException)
+                    {
+                        // The stream may have been closed or otherwise stopped.
+                    }
+
+                    // A client disconnecting ends its record stream but not necessarily the transport:
+                    // MSBuild connects a new client per build submission. Each one restarts the binary
+                    // log string tables, so the events reader has to be restarted along with them.
+                    if (!Buffer.TryStartNextConnection())
+                    {
+                        return null;
+                    }
+
+                    _buildEventArgsReader.Dispose();
+                    _buildEventArgsReader = new BuildEventArgsReader(_binaryReader, _fileFormatVersion);
                 }
             }
-        }
-        catch (EndOfStreamException)
-        {
-            // The stream may have been closed or otherwise stopped.
         }
         catch (ObjectDisposedException)
         {
@@ -201,16 +275,16 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
     /// <inheritdoc/>
     public void ReadAll()
     {
-        var args = Read();
-        while (args is not null)
+        while (Read() is not null)
         {
-            if (args is BuildFinishedEventArgs)
-            {
-                return;
-            }
-
-            args = Read();
         }
+    }
+
+    /// <inheritdoc/>
+    public void StopAcceptingConnections()
+    {
+        Volatile.Write(ref _stoppedAcceptingConnections, 1);
+        CancelConnectionWait();
     }
 
     /// <inheritdoc/>
@@ -222,6 +296,9 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
         }
 
         _cancellationRegistration.Dispose();
+
+        // The reader thread may be waiting for the next client, which no pipe shutdown reliably unblocks.
+        StopAcceptingConnections();
         RequestPipeShutdown();
 
         if (Volatile.Read(ref _started) != 0 && Thread.CurrentThread.ManagedThreadId != _readerThread.ManagedThreadId)

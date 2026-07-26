@@ -67,7 +67,7 @@ Use `PipeLoggerServer.GetLoggerSpecification(...)` to build the `type,assembly;p
 using System.Diagnostics;
 using XenoAtom.MsBuildPipeLogger;
 
-var pipeName = $"build-events-{Guid.NewGuid():N}";
+var pipeName = PipeLoggerServer.CreateUniquePipeName();
 using var server = new NamedPipeLoggerServer(pipeName);
 server.AnyEventRaised += (_, e) => Console.WriteLine(e.Message);
 
@@ -84,10 +84,32 @@ process.StartInfo.UseShellExecute = false;
 var readTask = Task.Run(server.ReadAll);
 process.Start();
 process.WaitForExit();
+server.StopAcceptingConnections();
 readTask.Wait();
 ```
 
 If you only need the logger assembly path, use `PipeLoggerServer.GetLoggerAssemblyPath()`.
+
+## Build submissions and the server lifetime
+
+MSBuild attaches the logger once per *build submission*: it calls `Initialize` at the start and `Shutdown`
+at the end, and the logger connects and disconnects the pipe along with it. A single command can run
+several submissions - `dotnet build -f <tfm>` runs restore as its own submission because restore has to
+run without a `TargetFramework` global property - so a named pipe server sees several sequential client
+connections for one build.
+
+`NamedPipeLoggerServer` therefore keeps listening after a client disconnects, and it starts a fresh event
+stream for each connection. Two consequences for the receiving process:
+
+- A client disconnecting no longer means the build is over, so `ReadAll()` does not return there. Call
+  `StopAcceptingConnections()` once the process you are observing has exited; events already received are
+  still dispatched, and `Read()`/`ReadAll()` return afterwards. Disposing the server also unblocks the
+  reader, but it does not wait for buffered events first.
+- `BuildFinishedEventArgs` marks the end of a submission, not the end of the build, and you will see one
+  per submission.
+
+`AnonymousPipeLoggerServer` serves a single client by construction, so `ReadAll()` returns when the child
+process closes its handle.
 
 ## Anonymous pipe example
 
@@ -119,7 +141,7 @@ readTask.Wait();
 using System.Diagnostics;
 using XenoAtom.MsBuildPipeLogger;
 
-var pipeName = $"build-events-{Guid.NewGuid():N}";
+var pipeName = PipeLoggerServer.CreateUniquePipeName();
 using var server = new NamedPipeLoggerServer(pipeName);
 server.AnyEventRaised += (_, e) => Console.WriteLine(e.Message);
 
@@ -127,7 +149,7 @@ var loggerSpecification = PipeLoggerServer.GetLoggerSpecification($"name={pipeNa
 
 using var process = new Process();
 process.StartInfo.FileName = "dotnet";
-process.StartInfo.ArgumentList.Add("msbuild");
+process.StartInfo.ArgumentList.Add("build");
 process.StartInfo.ArgumentList.Add("MyProject.csproj");
 process.StartInfo.ArgumentList.Add($"/logger:{loggerSpecification}");
 process.StartInfo.UseShellExecute = false;
@@ -135,8 +157,19 @@ process.StartInfo.UseShellExecute = false;
 var readTask = Task.Run(server.ReadAll);
 process.Start();
 process.WaitForExit();
+server.StopAcceptingConnections();
 readTask.Wait();
 ```
+
+## Pipe names
+
+On Unix a named pipe is a Unix domain socket at `<temp>/CoreFxPipe_<pipeName>`, and the whole path must fit
+in 104 bytes. macOS's per-user `TMPDIR` is long enough that this leaves only around 43 characters for the
+name, so an otherwise reasonable `$"myapp-build-{Guid.NewGuid():N}"` fails at construction.
+
+`PipeLoggerServer.CreateUniquePipeName()` mints a unique name that fits on the current platform, shortening
+the unique part as needed. `PipeLoggerServer.CreateUniquePipeName(prefix)` does the same with your own
+prefix, and `PipeLoggerServer.GetMaximumPipeNameLength()` reports the limit if you generate names yourself.
 
 ## Logger parameters
 
@@ -146,4 +179,4 @@ The logger accepts a small semicolon-separated parameter set:
 - `name=<pipeName>`: connect to a local named pipe.
 - `name=<pipeName>;server=<serverName>`: connect to a named pipe on a specific server.
 
-`Read()` blocks until an event is available, the transport closes, or cancellation/disposal unblocks the server. `ReadAll()` keeps dispatching events until the stream ends or a `BuildFinishedEventArgs` is received.
+`Read()` blocks until an event is available, the transport closes, or cancellation/disposal unblocks the server. `ReadAll()` keeps dispatching events until the server runs out of clients to serve; see [Build submissions and the server lifetime](#build-submissions-and-the-server-lifetime).

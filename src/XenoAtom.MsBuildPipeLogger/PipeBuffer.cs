@@ -11,11 +11,16 @@ internal class PipeBuffer : Stream
 {
     private const int BufferSize = 8192;
 
+    // Sentinel enqueued between two client connections. Compared by reference, never read from.
+    private static readonly Buffer ConnectionBoundary = new(Array.Empty<byte>(), 0, 0);
+
     private readonly ConcurrentBag<Buffer> _pool = new();
 
     private readonly BlockingCollection<Buffer> _queue = new(new ConcurrentQueue<Buffer>());
 
     private Buffer? _current;
+
+    private bool _connectionBoundaryReached;
 
     public void CompleteAdding()
     {
@@ -73,6 +78,40 @@ internal class PipeBuffer : Stream
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Marks the end of the bytes produced by the current client connection. Readers see the boundary
+    /// as an end of stream until they acknowledge it with <see cref="TryStartNextConnection"/>.
+    /// </summary>
+    public void EndConnection()
+    {
+        try
+        {
+            _queue.Add(ConnectionBoundary);
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    /// <summary>
+    /// Acknowledges a connection boundary previously reported as an end of stream so that reading can
+    /// resume with the bytes of the next connection.
+    /// </summary>
+    /// <returns><see langword="true"/> if a boundary was pending; otherwise <see langword="false"/>.</returns>
+    public bool TryStartNextConnection()
+    {
+        if (!_connectionBoundaryReached)
+        {
+            return false;
+        }
+
+        _connectionBoundaryReached = false;
+        return true;
     }
 
     public bool TryWriteEndOfFile()
@@ -181,11 +220,24 @@ internal class PipeBuffer : Stream
             return _current;
         }
 
+        if (_connectionBoundaryReached)
+        {
+            // Keep reporting an end of stream until the reader acknowledges the boundary.
+            return null;
+        }
+
         // Take() can throw when marked as complete from another thread
         // https://docs.microsoft.com/en-us/dotnet/api/system.collections.concurrent.blockingcollection-1.take?view=netcore-3.1
         try
         {
-            _current = _queue.Take();
+            var buffer = _queue.Take();
+            if (ReferenceEquals(buffer, ConnectionBoundary))
+            {
+                _connectionBoundaryReached = true;
+                return null;
+            }
+
+            _current = buffer;
             return _current;
         }
         catch (ObjectDisposedException)

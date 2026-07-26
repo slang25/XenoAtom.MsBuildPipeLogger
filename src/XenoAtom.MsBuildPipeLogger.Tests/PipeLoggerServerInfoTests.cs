@@ -39,4 +39,56 @@ public class PipeLoggerServerInfoTests
         Assert.Throws<ArgumentNullException>(() => PipeLoggerServer.GetLoggerSpecification(null!, "name=pipe"));
         Assert.Throws<ArgumentException>(() => PipeLoggerServer.GetLoggerSpecification(" ", "name=pipe"));
     }
+
+    [TestMethod]
+    public void CreateUniquePipeName_ReturnsUsableUniqueNames()
+    {
+        var first = PipeLoggerServer.CreateUniquePipeName();
+        var second = PipeLoggerServer.CreateUniquePipeName();
+
+        Assert.AreNotEqual(first, second);
+        Assert.StartsWith(PipeLoggerServer.DefaultPipeNamePrefix, first);
+        Assert.IsTrue(
+            first.Length <= PipeLoggerServer.GetMaximumPipeNameLength(),
+            $"'{first}' is longer than the {PipeLoggerServer.GetMaximumPipeNameLength()} characters allowed on this platform.");
+
+        // The point of the helper is that the name can actually be turned into a pipe.
+        using var server = new NamedPipeLoggerServer(first);
+        Assert.AreEqual(first, server.PipeName);
+    }
+
+    [TestMethod]
+    public void CreateUniquePipeName_UsesTheLongestUniquePartThatFits()
+    {
+        var maximumLength = PipeLoggerServer.GetMaximumPipeNameLength();
+        var prefix = new string('p', maximumLength - 20);
+
+        var pipeName = PipeLoggerServer.CreateUniquePipeName(prefix);
+
+        Assert.AreEqual(maximumLength, pipeName.Length);
+        Assert.StartsWith(prefix, pipeName);
+    }
+
+    [TestMethod]
+    public void CreateUniquePipeName_WithInvalidPrefix_Throws()
+    {
+        Assert.Throws<ArgumentNullException>(() => PipeLoggerServer.CreateUniquePipeName(null!));
+        Assert.Throws<ArgumentException>(() => PipeLoggerServer.CreateUniquePipeName(new string('p', PipeLoggerServer.GetMaximumPipeNameLength())));
+    }
+
+    [TestMethod]
+    public void NamedPipeLoggerServer_WithTooLongPipeName_ThrowsWithAnActionableMessage()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Inconclusive("Only Unix domain socket paths are short enough to make this reachable.");
+        }
+
+        var pipeName = new string('p', PipeLoggerServer.GetMaximumPipeNameLength() + 1);
+
+        var exception = Assert.Throws<ArgumentException>(() => new NamedPipeLoggerServer(pipeName));
+
+        Assert.AreEqual("pipeName", exception.ParamName);
+        Assert.Contains(nameof(PipeLoggerServer.CreateUniquePipeName), exception.Message);
+    }
 }
