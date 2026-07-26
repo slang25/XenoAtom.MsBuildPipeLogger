@@ -130,9 +130,7 @@ public abstract class PipeLoggerServer<TPipeStream> : PipeEventDispatcher, IPipe
             Connect();
             do
             {
-                while (Buffer.FillFromStream(PipeStream, CancellationToken))
-                {
-                }
+                DrainCurrentConnection();
             }
             while (TryAcceptNextConnection());
         }
@@ -161,6 +159,25 @@ public abstract class PipeLoggerServer<TPipeStream> : PipeEventDispatcher, IPipe
             // Add a final 0 (BinaryLogRecordKind.EndOfFile) into the stream in case the BuildEventArgsReader is waiting for a read.
             Buffer.TryWriteEndOfFile();
             Buffer.CompleteAdding();
+        }
+    }
+
+    /// <summary>
+    /// Reads from the currently connected client until it disconnects.
+    /// </summary>
+    private void DrainCurrentConnection()
+    {
+        try
+        {
+            while (Buffer.FillFromStream(PipeStream, CancellationToken))
+            {
+            }
+        }
+        catch (IOException)
+        {
+            // This client broke the stream, for example an MSBuild node that died mid-write. That ends
+            // the connection rather than the transport, so a later build submission can still be served.
+            // Disposal and cancellation surface as other exception types and are left to propagate.
         }
     }
 
