@@ -61,7 +61,17 @@ public class DotNetBuildMultiSubmissionTests
             process.BeginErrorReadLine();
 
             // Before the fix this never returned when withTargetFrameworkSelector was true.
-            await process.WaitForExitAsync().WaitAsync(TestTimeout).ConfigureAwait(false);
+            //
+            // Waiting on the process handle alone: WaitForExitAsync also waits for the redirected output
+            // streams to reach end of file, and MSBuild leaves task host nodes running after the build that
+            // inherited the write end of those pipes. They only close it when they idle out, minutes later,
+            // so waiting for the streams times out on a busy machine even though the build finished in
+            // seconds. The output is only used to explain a failure, so a truncated tail is acceptable.
+            if (!await Task.Run(() => process.WaitForExit((int)TestTimeout.TotalMilliseconds)).ConfigureAwait(false))
+            {
+                throw new TimeoutException($"dotnet build did not exit within {TestTimeout.TotalSeconds:F0}s.");
+            }
+
             server.StopListening();
             await readTask.WaitAsync(TestTimeout).ConfigureAwait(false);
         }
