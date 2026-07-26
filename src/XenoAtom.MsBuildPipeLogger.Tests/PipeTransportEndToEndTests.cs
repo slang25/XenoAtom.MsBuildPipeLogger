@@ -38,8 +38,10 @@ public class PipeTransportEndToEndTests
     }
 
     [TestMethod]
-    public async Task ReadAll_StopsAfterBuildFinishedEvent()
+    public async Task ReadAll_KeepsReadingAfterBuildFinishedEvent()
     {
+        // BuildFinished marks the end of an MSBuild submission, not the end of the transport, so it
+        // must not stop the drain: a build with more than one submission keeps writing afterwards.
         var pipeName = CreatePipeName();
         using var server = new NamedPipeLoggerServer(pipeName);
         var events = SubscribeAnyEvents(server);
@@ -51,7 +53,9 @@ public class PipeTransportEndToEndTests
         }
 
         await WaitForReadAllAsync(readTask, server).ConfigureAwait(false);
-        BuildEventAssertions.AssertEvents(events, messageCount: 1, includeBuildFinished: true);
+        Assert.AreEqual(4, events.Count);
+        Assert.IsInstanceOfType(events[3], typeof(BuildMessageEventArgs));
+        Assert.AreEqual("After finish", events[3].Message);
     }
 
     [TestMethod]
@@ -137,7 +141,7 @@ public class PipeTransportEndToEndTests
         BuildEventAssertions.AssertEvents(events, messageCount, includeBuildFinished: true);
     }
 
-    private static string CreatePipeName() => $"xenoatom-msbuild-{Guid.NewGuid():N}";
+    private static string CreatePipeName() => NamedPipeLoggerServer.CreatePipeName("xa-");
 
     private static List<BuildEventArgs> SubscribeAnyEvents(EventArgsDispatcher server)
     {

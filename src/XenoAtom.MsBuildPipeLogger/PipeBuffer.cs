@@ -17,6 +17,31 @@ internal class PipeBuffer : Stream
 
     private Buffer? _current;
 
+    private int _connectionBoundaryReached;
+
+    /// <summary>
+    /// Queues a marker that separates the bytes written by two different clients. Reads stop at the
+    /// marker so that a consumer never decodes bytes from two connections as a single stream.
+    /// </summary>
+    public void MarkConnectionBoundary()
+    {
+        try
+        {
+            _queue.Add(Buffer.ConnectionBoundary);
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    /// <summary>
+    /// Returns and clears the flag set when a read reached a connection boundary.
+    /// </summary>
+    public bool TryConsumeConnectionBoundary() => Interlocked.Exchange(ref _connectionBoundaryReached, 0) != 0;
+
     public void CompleteAdding()
     {
         try
@@ -116,24 +141,38 @@ internal class PipeBuffer : Stream
         {
             // Ensure a buffer is available
             var current = TakeBuffer();
-            if (current is not null)
-            {
-                // Get as much as we can from the current buffer
-                read += current.Read(buffer, offset + read, count - read);
-                if (current.Count == 0)
-                {
-                    // Used up this buffer, return to the pool if it's a pool buffer
-                    if (current.FromPool)
-                    {
-                        _pool.Add(current);
-                    }
-
-                    _current = null;
-                }
-            }
-            else
+            if (current is null)
             {
                 break;
+            }
+
+            if (current.IsConnectionBoundary)
+            {
+                if (read > 0)
+                {
+                    // Hand back what the previous client wrote first. The boundary stays current so
+                    // the next call reports it.
+                    break;
+                }
+
+                // Report the end of the connection as end of stream so the caller can reset the
+                // decoder it layered on top of this buffer before the next client's bytes arrive.
+                _current = null;
+                Interlocked.Exchange(ref _connectionBoundaryReached, 1);
+                break;
+            }
+
+            // Get as much as we can from the current buffer
+            read += current.Read(buffer, offset + read, count - read);
+            if (current.Count == 0)
+            {
+                // Used up this buffer, return to the pool if it's a pool buffer
+                if (current.FromPool)
+                {
+                    _pool.Add(current);
+                }
+
+                _current = null;
             }
         }
 
@@ -208,14 +247,28 @@ internal class PipeBuffer : Stream
 
         private int _offset;
 
+        /// <summary>
+        /// A shared, immutable marker queued between two client connections. It carries no data, so a
+        /// single instance can be reused by every <see cref="PipeBuffer"/>.
+        /// </summary>
+        public static Buffer ConnectionBoundary { get; } = new(isConnectionBoundary: true);
+
         public int Count { get; private set; }
 
         public bool FromPool { get; }
+
+        public bool IsConnectionBoundary { get; }
 
         public Buffer()
         {
             _buffer = new byte[BufferSize];
             FromPool = true;
+        }
+
+        private Buffer(bool isConnectionBoundary)
+        {
+            _buffer = Array.Empty<byte>();
+            IsConnectionBoundary = isConnectionBoundary;
         }
 
         public Buffer(byte[] buffer, int offset, int count)
