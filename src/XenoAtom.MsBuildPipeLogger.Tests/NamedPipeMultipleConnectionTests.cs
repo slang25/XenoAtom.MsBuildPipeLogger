@@ -20,7 +20,7 @@ public class NamedPipeMultipleConnectionTests
     public async Task AcceptsMultipleConnections_ReadsEveryConnection()
     {
         var pipeName = NamedPipeLoggerServer.CreatePipeName("xa-");
-        using var server = new NamedPipeLoggerServer(pipeName, acceptMultipleConnections: true);
+        using var server = new NamedPipeLoggerServer(pipeName);
         var events = new List<BuildEventArgs>();
         server.AnyEventRaised += (_, e) => events.Add(e);
         var readTask = Task.Run(server.ReadAll);
@@ -33,8 +33,7 @@ public class NamedPipeMultipleConnectionTests
             writer.Write(new BuildFinishedEventArgs($"finished-{connection}", "help", true));
         }
 
-        await WaitForAsync(() => events.Count >= 9).ConfigureAwait(false);
-        server.Dispose();
+        server.StopListening();
         await readTask.WaitAsync(TestTimeout).ConfigureAwait(false);
 
         Assert.AreEqual(9, events.Count);
@@ -53,7 +52,7 @@ public class NamedPipeMultipleConnectionTests
         // the server carried one reader across connections, the second connection's string indexes
         // would resolve against the first connection's strings and silently return its text.
         var pipeName = NamedPipeLoggerServer.CreatePipeName("xa-");
-        using var server = new NamedPipeLoggerServer(pipeName, acceptMultipleConnections: true);
+        using var server = new NamedPipeLoggerServer(pipeName);
         var messages = new List<string?>();
         server.MessageRaised += (_, e) => messages.Add(e.Message);
         var readTask = Task.Run(server.ReadAll);
@@ -68,18 +67,47 @@ public class NamedPipeMultipleConnectionTests
             writer.Write(new BuildMessageEventArgs("second-connection-text", "help", "sender", MessageImportance.Normal));
         }
 
-        await WaitForAsync(() => messages.Count >= 2).ConfigureAwait(false);
-        server.Dispose();
+        server.StopListening();
         await readTask.WaitAsync(TestTimeout).ConfigureAwait(false);
 
         CollectionAssert.AreEqual(new[] { "first-connection-text", "second-connection-text" }, messages);
     }
 
     [TestMethod]
-    public async Task SingleConnectionServer_StopsAfterTheClientDisconnects()
+    public async Task StopListening_DeliversEveryBufferedEvent()
+    {
+        // Dispose ends the transport at once and drops whatever the reader has not handed over yet,
+        // which loses the tail of a build. StopListening has to drain instead. Repeated because the
+        // loss depends on how far the reader happens to have got.
+        const int messageCount = 500;
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            var pipeName = NamedPipeLoggerServer.CreatePipeName("xa-");
+            using var server = new NamedPipeLoggerServer(pipeName);
+            var received = 0;
+            server.MessageRaised += (_, _) => Interlocked.Increment(ref received);
+            var readTask = Task.Run(server.ReadAll);
+
+            using (var writer = ParameterParser.GetPipeFromParameters($"name={pipeName}"))
+            {
+                for (var index = 0; index < messageCount; index++)
+                {
+                    writer.Write(new BuildMessageEventArgs($"message-{index}", "help", "sender", MessageImportance.Normal));
+                }
+            }
+
+            server.StopListening();
+            await readTask.WaitAsync(TestTimeout).ConfigureAwait(false);
+
+            Assert.AreEqual(messageCount, Volatile.Read(ref received), $"Events were dropped on attempt {attempt}.");
+        }
+    }
+
+    [TestMethod]
+    public async Task OptingOut_StopsAfterTheClientDisconnects()
     {
         var pipeName = NamedPipeLoggerServer.CreatePipeName("xa-");
-        using var server = new NamedPipeLoggerServer(pipeName);
+        using var server = new NamedPipeLoggerServer(pipeName, acceptMultipleConnections: false);
         var readTask = Task.Run(server.ReadAll);
 
         using (var writer = ParameterParser.GetPipeFromParameters($"name={pipeName}"))
@@ -87,8 +115,8 @@ public class NamedPipeMultipleConnectionTests
             writer.Write(new BuildMessageEventArgs("only", "help", "sender", MessageImportance.Normal));
         }
 
-        // Without acceptMultipleConnections the transport still ends with the client, so ReadAll
-        // returns on its own rather than waiting for a disposal.
+        // With acceptMultipleConnections: false the transport ends with the client, so ReadAll
+        // returns on its own without StopListening.
         await readTask.WaitAsync(TestTimeout).ConfigureAwait(false);
     }
 
@@ -96,7 +124,7 @@ public class NamedPipeMultipleConnectionTests
     public async Task AcceptsMultipleConnections_DisposeUnblocksReadWhileWaitingForTheNextClient()
     {
         var pipeName = NamedPipeLoggerServer.CreatePipeName("xa-");
-        using var server = new NamedPipeLoggerServer(pipeName, acceptMultipleConnections: true);
+        using var server = new NamedPipeLoggerServer(pipeName);
         var messages = new List<string?>();
         server.MessageRaised += (_, e) => messages.Add(e.Message);
         var readTask = Task.Run(server.ReadAll);
@@ -117,7 +145,7 @@ public class NamedPipeMultipleConnectionTests
     {
         var pipeName = NamedPipeLoggerServer.CreatePipeName("xa-");
         using var tokenSource = new CancellationTokenSource();
-        using var server = new NamedPipeLoggerServer(pipeName, acceptMultipleConnections: true, tokenSource.Token);
+        using var server = new NamedPipeLoggerServer(pipeName, tokenSource.Token);
         var messages = new List<string?>();
         server.MessageRaised += (_, e) => messages.Add(e.Message);
         var readTask = Task.Run(server.ReadAll);

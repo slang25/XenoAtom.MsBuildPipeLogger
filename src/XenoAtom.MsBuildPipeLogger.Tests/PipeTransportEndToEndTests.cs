@@ -166,6 +166,9 @@ public class PipeTransportEndToEndTests
 
     private static async Task WaitForReadAllAsync(Task readTask, IPipeLoggerServer server)
     {
+        // A named pipe server keeps listening for the next submission, so the consumer is the one
+        // that decides the build is over. StopListening drains what has arrived; Dispose would not.
+        server.StopListening();
         try
         {
             await readTask.WaitAsync(TestTimeout).ConfigureAwait(false);
@@ -193,7 +196,9 @@ public class PipeTransportEndToEndTests
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
-            await Task.WhenAll(readTask, process.WaitForExitAsync()).WaitAsync(TestTimeout).ConfigureAwait(false);
+            await process.WaitForExitAsync().WaitAsync(TestTimeout).ConfigureAwait(false);
+            server.StopListening();
+            await readTask.WaitAsync(TestTimeout).ConfigureAwait(false);
             WriteLine($"Exited process {process.Id} with code {process.ExitCode}");
             return process.ExitCode;
         }

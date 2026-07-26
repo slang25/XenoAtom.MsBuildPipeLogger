@@ -10,7 +10,7 @@ A single package that lets one process run MSBuild with a bundled pipe logger wh
 - Includes the MSBuild logger assembly as isolated copy-to-output content under `XenoAtom.MsBuildPipeLogger/`.
 - Helper APIs return the bundled logger path/specification to pass directly to MSBuild.
 - Supports anonymous pipes and named pipes from a `netstandard2.0` logger assembly.
-- Optionally observes a whole build across several MSBuild submissions, such as `dotnet build -f <tfm>`.
+- Observes a whole build across several MSBuild submissions by default, such as `dotnet build -f <tfm>`.
 - Nullable-enabled projects with package metadata/readme/icon configured for the publishable package.
 
 ## 📦 Package

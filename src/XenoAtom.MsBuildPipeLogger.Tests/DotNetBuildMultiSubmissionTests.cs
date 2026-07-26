@@ -30,7 +30,8 @@ public class DotNetBuildMultiSubmissionTests
         CreateProject(projectDirectory, projectPath);
 
         var pipeName = NamedPipeLoggerServer.CreatePipeName("xa-");
-        using var server = new NamedPipeLoggerServer(pipeName, acceptMultipleConnections: true);
+        // Multiple submissions are served by default; no flag needed.
+        using var server = new NamedPipeLoggerServer(pipeName);
         var buildStartedCount = 0;
         var buildFinishedCount = 0;
         server.BuildStarted += (_, _) => Interlocked.Increment(ref buildStartedCount);
@@ -63,7 +64,7 @@ public class DotNetBuildMultiSubmissionTests
 
         // The reader keeps listening for another submission, so the consumer ends it once the build
         // process it was observing has exited.
-        server.Dispose();
+        server.StopListening();
         await readTask.WaitAsync(TestTimeout).ConfigureAwait(false);
 
         var processOutput = string.Join(Environment.NewLine, output);

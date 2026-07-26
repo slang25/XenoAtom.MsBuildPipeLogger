@@ -42,8 +42,10 @@ public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
 
     private static readonly int MaxPipeNameLengthValue = CalculateMaxPipeNameLength();
 
-    private readonly InterlockedBool _connected = new(false);
+    private readonly object _connectionLock = new();
     private readonly CancellationTokenRegistration _cancellationRegistration;
+
+    private bool _waitingForConnection;
 
     /// <summary>
     /// Gets the named pipe name.
@@ -118,25 +120,39 @@ public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
     }
 
     /// <summary>
-    /// Creates a named pipe server that receives MSBuild logging events from a single client.
+    /// Creates a named pipe server for receiving MSBuild logging events from every submission of a
+    /// build.
     /// </summary>
     /// <param name="pipeName">The name of the pipe to create.</param>
     /// <exception cref="ArgumentException"><paramref name="pipeName"/> is empty, whitespace, or longer than <see cref="MaxPipeNameLength"/>.</exception>
     /// <exception cref="ArgumentNullException"><paramref name="pipeName"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// The server keeps listening after a client disconnects, so
+    /// <see cref="PipeLoggerServer{TPipeStream}.ReadAll"/> and <see cref="PipeLoggerServer{TPipeStream}.Read"/>
+    /// wait for the next submission. Call <see cref="PipeLoggerServer{TPipeStream}.StopListening"/>
+    /// once the build process being observed has exited.
+    /// </remarks>
     public NamedPipeLoggerServer(string pipeName)
-        : this(pipeName, false, CancellationToken.None)
+        : this(pipeName, true, CancellationToken.None)
     {
     }
 
     /// <summary>
-    /// Creates a named pipe server that receives MSBuild logging events from a single client.
+    /// Creates a named pipe server for receiving MSBuild logging events from every submission of a
+    /// build.
     /// </summary>
     /// <param name="pipeName">The name of the pipe to create.</param>
     /// <param name="cancellationToken">A <see cref="CancellationToken"/> that will cancel read operations if triggered.</param>
     /// <exception cref="ArgumentException"><paramref name="pipeName"/> is empty, whitespace, or longer than <see cref="MaxPipeNameLength"/>.</exception>
     /// <exception cref="ArgumentNullException"><paramref name="pipeName"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// The server keeps listening after a client disconnects, so
+    /// <see cref="PipeLoggerServer{TPipeStream}.ReadAll"/> and <see cref="PipeLoggerServer{TPipeStream}.Read"/>
+    /// wait for the next submission. Call <see cref="PipeLoggerServer{TPipeStream}.StopListening"/>
+    /// once the build process being observed has exited.
+    /// </remarks>
     public NamedPipeLoggerServer(string pipeName, CancellationToken cancellationToken)
-        : this(pipeName, false, cancellationToken)
+        : this(pipeName, true, cancellationToken)
     {
     }
 
@@ -195,17 +211,42 @@ public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
     }
 
     /// <inheritdoc/>
+    /// <exception cref="OperationCanceledException">The server stopped accepting connections before the wait began.</exception>
     protected override void Connect()
     {
-        _connected.Unset();
-        PipeStream.WaitForConnection();
-        _connected.Set();
+        lock (_connectionLock)
+        {
+            if (IsShutdownRequested || IsListeningStopped)
+            {
+                // Claiming the wait and observing the stop must happen under one lock, otherwise a
+                // stop that arrives here would find nothing to unblock and the wait below would
+                // never end.
+                throw new OperationCanceledException("The logger server has stopped accepting connections.");
+            }
+
+            _waitingForConnection = true;
+        }
+
+        try
+        {
+            PipeStream.WaitForConnection();
+        }
+        finally
+        {
+            lock (_connectionLock)
+            {
+                _waitingForConnection = false;
+            }
+        }
     }
+
+    /// <inheritdoc/>
+    protected override void StopAcceptingConnections() => UnblockConnectionWait();
 
     /// <inheritdoc/>
     protected override bool Reconnect()
     {
-        if (!AcceptsMultipleConnections || IsShutdownRequested)
+        if (!AcceptsMultipleConnections || IsShutdownRequested || IsListeningStopped)
         {
             return false;
         }
@@ -234,8 +275,8 @@ public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
             return false;
         }
 
-        // A cancelled wait is unblocked by a dummy client, so re-check instead of trusting the connection.
-        return !IsShutdownRequested;
+        // A wait that was unblocked by a dummy client looks like a real connection, so re-check.
+        return !IsShutdownRequested && !IsListeningStopped;
     }
 
     private static NamedPipeServerStream CreatePipe(string pipeName)
@@ -286,11 +327,18 @@ public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
         return available > 0 ? available : 0;
     }
 
-    private void CancelConnectionWait()
+    private void CancelConnectionWait() => UnblockConnectionWait();
+
+    private void UnblockConnectionWait()
     {
-        if (_connected.Set())
+        lock (_connectionLock)
         {
-            return;
+            if (!_waitingForConnection)
+            {
+                // Nothing to unblock. The reader either has a client, or has not started waiting yet
+                // and will see the stop flag when it takes this lock in Connect.
+                return;
+            }
         }
 
         try

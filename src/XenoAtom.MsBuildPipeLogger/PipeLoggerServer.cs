@@ -28,6 +28,7 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
     private BinaryReader _binaryReader;
     private BuildEventArgsReader _buildEventArgsReader;
     private int _disposed;
+    private int _listeningStopped;
     private int _pipeShutdownRequested;
     private int _started;
 
@@ -47,6 +48,11 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
     /// Gets a value indicating whether the server has been disposed or its cancellation token was triggered.
     /// </summary>
     protected bool IsShutdownRequested => Volatile.Read(ref _disposed) != 0 || CancellationToken.IsCancellationRequested;
+
+    /// <summary>
+    /// Gets a value indicating whether <see cref="StopListening"/> was called.
+    /// </summary>
+    protected bool IsListeningStopped => Volatile.Read(ref _listeningStopped) != 0;
 
     /// <summary>
     /// Creates a server that receives MSBuild events over a specified pipe.
@@ -116,6 +122,14 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
     /// <see langword="false"/> to stop reading. The base implementation always returns <see langword="false"/>.
     /// </returns>
     protected virtual bool Reconnect() => false;
+
+    /// <summary>
+    /// Unblocks a pending wait for the next client so that the reader can finish. The base
+    /// implementation does nothing.
+    /// </summary>
+    protected virtual void StopAcceptingConnections()
+    {
+    }
 
     /// <summary>
     /// Starts the background reader thread.
@@ -248,6 +262,17 @@ public abstract class PipeLoggerServer<TPipeStream> : EventArgsDispatcher, IPipe
         while (Read() is not null)
         {
         }
+    }
+
+    /// <inheritdoc/>
+    public void StopListening()
+    {
+        if (Interlocked.Exchange(ref _listeningStopped, 1) != 0)
+        {
+            return;
+        }
+
+        StopAcceptingConnections();
     }
 
     /// <inheritdoc/>

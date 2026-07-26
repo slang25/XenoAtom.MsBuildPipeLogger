@@ -84,6 +84,7 @@ process.StartInfo.UseShellExecute = false;
 var readTask = Task.Run(server.ReadAll);
 process.Start();
 process.WaitForExit();
+server.StopListening();
 readTask.Wait();
 ```
 
@@ -135,6 +136,7 @@ process.StartInfo.UseShellExecute = false;
 var readTask = Task.Run(server.ReadAll);
 process.Start();
 process.WaitForExit();
+server.StopListening();
 readTask.Wait();
 ```
 
@@ -152,34 +154,49 @@ The logger accepts a small semicolon-separated parameter set:
 
 ## Builds with more than one MSBuild submission
 
-A `NamedPipeLoggerServer` serves one client connection by default, and the logger connects on `Initialize` and disconnects on `Shutdown`. MSBuild runs that lifecycle once per build submission, so a command that produces more than one submission produces more than one connection.
+The logger connects on `Initialize` and disconnects on `Shutdown`, and MSBuild runs that lifecycle once per build submission. A command that produces more than one submission therefore produces more than one connection.
 
-`dotnet build -f <tfm>` is the common case: restore has to run without a `TargetFramework` global property, so it cannot share a submission with the build pass. With a single-connection server the second connection is never served, and the child process blocks writing into a pipe nobody is draining - with no error and no timeout.
+`dotnet build -f <tfm>` is the common case: restore has to run without a `TargetFramework` global property, so it cannot share a submission with the build pass. `dotnet msbuild` is a single submission.
 
-Pass `acceptMultipleConnections: true` so the server keeps the same listener open across connections:
+`NamedPipeLoggerServer` handles this by default - it keeps one listener open across connections, so every submission is received in order. The consequence is that **the server cannot tell that the last submission has been and gone**, so it keeps waiting. You end the read, once the build process you are observing has exited:
 
 ```csharp
 var pipeName = NamedPipeLoggerServer.CreatePipeName();
-using var server = new NamedPipeLoggerServer(pipeName, acceptMultipleConnections: true);
+using var server = new NamedPipeLoggerServer(pipeName);
 server.AnyEventRaised += (_, e) => Console.WriteLine(e.Message);
 
 var readTask = Task.Run(server.ReadAll);
 process.Start();
 process.WaitForExit();
 
-// The server is still listening for another submission, so end it once the build process has exited.
-server.Dispose();
-readTask.Wait();
+server.StopListening();   // no more submissions are coming
+readTask.Wait();          // dispatches what is left, then returns
 ```
 
-Two things change when this is enabled:
+Use `StopListening()` rather than `Dispose()` to end the read. `Dispose()` ends the transport immediately and discards anything the reader has not handed over yet, which silently loses the tail of the build; `StopListening()` stops waiting for new clients and drains what has already arrived first. Dispose afterwards as usual, which the `using` above does.
 
-- `Read()` and `ReadAll()` no longer return when a client disconnects, because another one may still arrive. Dispose the server, or trigger its cancellation token, once the build process you are observing has exited.
-- Each connection is decoded independently, so events are dispatched in order across submissions.
+Re-creating the server in your own code is not a safe substitute for the built-in behavior: the operating system still holds the previous instance of the pipe, so the new listener can fail with `All pipe instances are busy`, leaving a window in which nothing is listening and the build hangs. Keeping the listener open inside the server avoids that window entirely.
 
-Re-creating the server in your own code is not a safe substitute: the operating system still holds the previous instance of the pipe, so the new listener can fail with `All pipe instances are busy`, leaving a window in which nothing is listening and the build hangs. Keeping the listener open inside the server avoids that window entirely.
+### Opting out
 
-If you would rather keep a single connection, guarantee a single submission - use `dotnet msbuild`, or `dotnet build --no-restore` with restore driven separately.
+If you control the invocation and know it is a single submission, `acceptMultipleConnections: false` restores the simpler lifetime, where the transport ends with the client and `ReadAll()` returns on its own:
+
+```csharp
+using var server = new NamedPipeLoggerServer(pipeName, acceptMultipleConnections: false);
+var readTask = Task.Run(server.ReadAll);
+process.Start();
+process.WaitForExit();
+readTask.Wait();          // returns without StopListening
+```
+
+Only do this when a single submission is guaranteed - `dotnet msbuild`, or `dotnet build --no-restore` with restore driven separately. If a second submission does connect, it will not be served and the build will hang.
+
+### Upgrading from 1.x
+
+Multiple connections used to be unsupported, and `ReadAll()` returned at the first `BuildFinishedEventArgs`. Two changes to be aware of:
+
+- Code that ends with `process.WaitForExit(); readTask.Wait();` now needs `server.StopListening()` between the two lines, or it waits forever. This shows up immediately and every time, not intermittently.
+- `ReadAll()` no longer stops at `BuildFinishedEventArgs`, so a consumer that relied on that to bound the read should call `StopListening()` too, or subscribe to `BuildFinished`.
 
 ## Pipe names
 
