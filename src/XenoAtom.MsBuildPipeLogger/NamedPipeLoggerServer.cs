@@ -20,6 +20,11 @@ namespace XenoAtom.MsBuildPipeLogger;
 /// </remarks>
 public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
 {
+    // How long to wait to establish that no more clients are queued once a stop has been requested. A
+    // client that has already connected is accepted immediately, so this only has to cover scheduling the
+    // completion, not waiting for anyone to arrive.
+    private static readonly TimeSpan BacklogDrainTimeout = TimeSpan.FromMilliseconds(250);
+
     // Cancelling the accept is the entire stop mechanism. A CancellationToken already makes "observe the
     // stop" and "claim the wait" one atomic step: an accept started with a cancelled token never blocks,
     // and one already blocked is cancelled. So there is no window in which a stop goes unnoticed and no
@@ -128,7 +133,7 @@ public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
     }
 
     /// <inheritdoc/>
-    protected override void Connect() => WaitForNextConnection();
+    protected override bool Connect() => WaitForNextConnection();
 
     /// <inheritdoc/>
     protected override bool TryAcceptNextConnection()
@@ -198,6 +203,15 @@ public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
     /// <returns><see langword="true"/> if a client connected and should be read.</returns>
     private bool WaitForNextConnection()
     {
+        // A stop that arrives before we reach the accept must not discard clients that have already
+        // connected. The build process can finish writing a submission and exit while the reader is still
+        // busy, leaving that connection queued, and an accept handed an already-cancelled token returns
+        // without taking anything off the queue. Mop the queue up before finishing.
+        if (_stopListeningSource.IsCancellationRequested)
+        {
+            return TryAcceptQueuedConnection();
+        }
+
         try
         {
             // Blocking the dedicated reader thread on the async accept is what lets the stop cancel it.
@@ -207,8 +221,10 @@ public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
         }
         catch (OperationCanceledException)
         {
-            // Asked to stop listening.
-            return false;
+            // Being cancelled here does not mean nothing was queued. A client can connect while we are
+            // blocked and have the cancellation win the race to complete the accept, which loses that whole
+            // submission, so the queue has to be checked either way.
+            return TryAcceptQueuedConnection();
         }
         catch (IOException)
         {
@@ -226,6 +242,47 @@ public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
         catch (InvalidOperationException)
         {
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Accepts a client that connected before the stop was requested, if one is still queued.
+    /// </summary>
+    /// <remarks>
+    /// Accepting is immediate when the queue is not empty, so the timeout is only how long we are willing
+    /// to wait to establish that it <em>is</em> empty. It bounds the end of a read rather than deciding
+    /// whether a connected client is served.
+    /// </remarks>
+    private bool TryAcceptQueuedConnection()
+    {
+        using (var drainTimeout = new CancellationTokenSource(BacklogDrainTimeout))
+        {
+            try
+            {
+                PipeStream.WaitForConnectionAsync(drainTimeout.Token).GetAwaiter().GetResult();
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                // Nothing left queued.
+                return false;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (ObjectDisposedException)
+            {
+                return false;
+            }
+            catch (SocketException)
+            {
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
         }
     }
 }

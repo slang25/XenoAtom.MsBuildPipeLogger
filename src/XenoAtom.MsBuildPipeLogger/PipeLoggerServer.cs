@@ -91,7 +91,9 @@ public abstract class PipeLoggerServer<TPipeStream> : PipeEventDispatcher, IPipe
     /// <summary>
     /// Connects the server-side pipe stream to a client.
     /// </summary>
-    protected abstract void Connect();
+    /// <returns><see langword="true"/> if a client was connected and should be read;
+    /// <see langword="false"/> to finish without reading.</returns>
+    protected abstract bool Connect();
 
     /// <summary>
     /// Accepts the next client once the current one has disconnected, for transports that serve more than
@@ -127,7 +129,11 @@ public abstract class PipeLoggerServer<TPipeStream> : PipeEventDispatcher, IPipe
     {
         try
         {
-            Connect();
+            if (!Connect())
+            {
+                return;
+            }
+
             do
             {
                 DrainCurrentConnection();

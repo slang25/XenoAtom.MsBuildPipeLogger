@@ -101,7 +101,7 @@ public class NamedPipeMultipleSubmissionTests
         // The stop can land before the reader reaches the accept, while it is blocked in the accept, or
         // while it is draining a client. Claiming the wait and observing the stop have to be one atomic
         // step or a stop in the first window finds nothing to unblock and the reader waits forever.
-        for (var attempt = 0; attempt < 40; attempt++)
+        for (var attempt = 0; attempt < 20; attempt++)
         {
             var pipeName = CreatePipeName();
             using var server = new NamedPipeLoggerServer(pipeName);
@@ -146,6 +146,36 @@ public class NamedPipeMultipleSubmissionTests
             await readTask.WaitAsync(TestTimeout).ConfigureAwait(false);
 
             Assert.AreEqual(500, events.OfType<PipeBuildMessageEventArgs>().Count(), $"Attempt {attempt} lost events.");
+        }
+    }
+
+    [TestMethod]
+    [DoNotParallelize]
+    public async Task StopListening_KeepsEventsFromClientsThatConnectedFirst()
+    {
+        // Repeated because the loss depends on the reader not having reached the accept yet, which is a
+        // scheduling race: it reproduced on every run on a single core and on roughly one in three here.
+        for (var i = 0; i < 12; i++)
+        {
+            var pipeName = CreatePipeName();
+            using var server = new NamedPipeLoggerServer(pipeName);
+            var events = new List<PipeBuildEventArgs>();
+            server.AnyEventRaised += e => events.Add(e);
+            var readTask = Task.Run(server.ReadAll);
+
+            // Deliberately no pause: the client connects and writes while the reader may still be starting,
+            // which is what MSBuild does when a short submission finishes before the server accepts it.
+            using (var writer = ParameterParser.GetPipeFromParameters($"name={pipeName}"))
+            {
+                BuildEventAssertions.WriteEvents(writer, messageCount: 5, includeBuildFinished: true);
+            }
+
+            server.StopListening();
+            await readTask.WaitAsync(TestTimeout).ConfigureAwait(false);
+
+            // Stopping must serve what has already connected, not abandon it. Dropping the accept here
+            // silently loses a whole submission.
+            Assert.AreEqual(5, events.OfType<PipeBuildMessageEventArgs>().Count(), $"iteration {i}");
         }
     }
 

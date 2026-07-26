@@ -85,7 +85,7 @@ public class AnonymousPipeLoggerServer : PipeLoggerServer<AnonymousPipeServerStr
     }
 
     /// <inheritdoc/>
-    protected override void Connect()
+    protected override bool Connect()
     {
         // Wait for the first write, there's a chicken-and-egg problem with the pipe handle.
         // I can only dispose the local handle after the first pipe read, which blocks.
@@ -98,6 +98,8 @@ public class AnonymousPipeLoggerServer : PipeLoggerServer<AnonymousPipeServerStr
         {
             DisposeLocalClientHandle();
         }
+
+        return true;
     }
 
     private void DisposeLocalClientHandle()

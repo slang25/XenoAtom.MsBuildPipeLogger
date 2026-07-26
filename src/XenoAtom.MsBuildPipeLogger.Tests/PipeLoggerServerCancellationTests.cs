@@ -142,7 +142,7 @@ public class PipeLoggerServerCancellationTests
             StartReading();
         }
 
-        protected override void Connect()
+        protected override bool Connect()
         {
             while (!CancellationToken.IsCancellationRequested)
             {
@@ -161,7 +161,7 @@ public class PipeLoggerServerCancellationTests
             StartReading();
         }
 
-        protected override void Connect()
+        protected override bool Connect()
         {
             while (!CancellationToken.IsCancellationRequested)
             {
