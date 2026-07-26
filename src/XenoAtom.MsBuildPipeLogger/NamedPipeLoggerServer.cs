@@ -4,6 +4,7 @@
 
 using System.IO.Pipes;
 using System.Net.Sockets;
+using System.Text;
 
 namespace XenoAtom.MsBuildPipeLogger;
 
@@ -72,6 +73,18 @@ public class NamedPipeLoggerServer : PipeLoggerServer<NamedPipeServerStream>
         if (string.IsNullOrWhiteSpace(pipeName))
         {
             throw new ArgumentException("The pipe name cannot be empty or whitespace.", nameof(pipeName));
+        }
+
+        // On Unix the name becomes part of a domain socket path, and exceeding the platform limit
+        // otherwise surfaces as an ArgumentOutOfRangeException about a 'path' the caller never supplied.
+        var maximumLength = PipeLoggerServer.GetMaximumPipeNameLength();
+        if (Encoding.UTF8.GetByteCount(pipeName) > maximumLength)
+        {
+            throw new ArgumentException(
+                $"The pipe name '{pipeName}' is too long: this platform allows at most {maximumLength} characters " +
+                $"because the name becomes part of a socket path under '{Path.GetTempPath()}'. Use " +
+                $"{nameof(PipeLoggerServer)}.{nameof(PipeLoggerServer.CreateUniquePipeName)}() to get a name that fits.",
+                nameof(pipeName));
         }
 
         return new NamedPipeServerStream(pipeName, PipeDirection.In);

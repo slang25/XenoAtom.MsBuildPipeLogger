@@ -19,7 +19,7 @@ public class MsBuildLoggerEndToEndTests
     [TestMethod]
     public async Task DotNetMsBuild_LoadsLoggerAndStreamsBuildEvents()
     {
-        var pipeName = $"xenoatom-msbuild-{Guid.NewGuid():N}";
+        var pipeName = PipeLoggerServer.CreateUniquePipeName("xa-test");
         var projectDirectory = Path.Combine(Path.GetTempPath(), $"xenoatom-msbuild-{Guid.NewGuid():N}");
         var projectPath = Path.Combine(projectDirectory, "build.proj");
         Directory.CreateDirectory(projectDirectory);

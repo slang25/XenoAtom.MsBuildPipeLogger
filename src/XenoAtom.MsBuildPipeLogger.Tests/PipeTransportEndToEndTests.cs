@@ -136,7 +136,7 @@ public class PipeTransportEndToEndTests
         BuildEventAssertions.AssertEvents(events, messageCount, includeBuildFinished: true);
     }
 
-    private static string CreatePipeName() => $"xenoatom-msbuild-{Guid.NewGuid():N}";
+    private static string CreatePipeName() => PipeLoggerServer.CreateUniquePipeName("xa-test");
 
     private static List<PipeBuildEventArgs> SubscribeAnyEvents(PipeEventDispatcher server)
     {
